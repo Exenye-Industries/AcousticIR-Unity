@@ -151,7 +151,7 @@ namespace AcousticIR.Core
             float decayRate = -6.908f / estimatedRT60; // ln(0.001) = -6.908
 
             // Density increases with time (Poisson process)
-            var rng = new Random(42);
+            var rng = new Unity.Mathematics.Random(42);
             float baseDensity = 200f; // Impulses per second at the start
 
             for (int s = startSample; s < ir.Length; s++)

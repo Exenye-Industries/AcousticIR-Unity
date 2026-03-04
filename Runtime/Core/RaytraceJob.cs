@@ -56,7 +56,7 @@ namespace AcousticIR.Core
         {
             ActiveRay ray = activeRays[index];
             RaycastHit hit = hitResults[index];
-            var rng = new Random(ray.randomSeed + (uint)(ray.bounceCount * 7919));
+            var rng = new Unity.Mathematics.Random(ray.randomSeed + (uint)(ray.bounceCount * 7919));
 
             // Check if the ray hit anything
             bool didHit = hit.colliderInstanceID != 0;
