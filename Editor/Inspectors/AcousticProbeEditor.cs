@@ -6,9 +6,6 @@ using UnityEngine;
 
 namespace AcousticIR.Editor.Inspectors
 {
-    /// <summary>
-    /// Custom inspector for AcousticProbe with bake controls and IR preview.
-    /// </summary>
     [CustomEditor(typeof(AcousticProbe))]
     public class AcousticProbeEditor : UnityEditor.Editor
     {
@@ -19,63 +16,44 @@ namespace AcousticIR.Editor.Inspectors
             var probe = (AcousticProbe)target;
 
             EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("Bake Controls", EditorStyles.boldLabel);
 
-            // Bake button
+            // Big green Bake button - always works, no setup needed
             GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
-            if (GUILayout.Button("Bake IR", GUILayout.Height(30)))
+            if (GUILayout.Button($"Bake IR  ({probe.RayCount} rays, {probe.MaxBounces} bounces)", GUILayout.Height(35)))
             {
                 BakeIR(probe);
             }
             GUI.backgroundColor = Color.white;
 
-            // Show baked IR info
+            // Show baked IR info + export
             if (probe.BakedIR != null && probe.BakedIR.SampleCount > 0)
             {
                 EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Baked IR Info", EditorStyles.boldLabel);
-
                 EditorGUILayout.HelpBox(
-                    $"Length: {probe.BakedIR.LengthSeconds:F2}s\n" +
-                    $"Sample Rate: {probe.BakedIR.SampleRate} Hz\n" +
-                    $"Samples: {probe.BakedIR.SampleCount:N0}\n" +
-                    $"Rays: {probe.BakedIR.RayCount:N0}\n" +
-                    $"Bounces: {probe.BakedIR.MaxBounces}",
+                    $"IR: {probe.BakedIR.LengthSeconds:F2}s | " +
+                    $"{probe.BakedIR.SampleRate} Hz | " +
+                    $"{probe.BakedIR.SampleCount:N0} samples | " +
+                    $"{probe.BakedIR.RayCount} rays",
                     MessageType.Info);
 
-                EditorGUILayout.Space(5);
-
-                // Export buttons
                 EditorGUILayout.BeginHorizontal();
-
                 if (GUILayout.Button("Export WAV (32-bit float)"))
-                {
                     ExportWav(probe.BakedIR, false);
-                }
-
                 if (GUILayout.Button("Export WAV (16-bit PCM)"))
-                {
                     ExportWav(probe.BakedIR, true);
-                }
-
                 EditorGUILayout.EndHorizontal();
 
-                // Save as asset button
                 if (GUILayout.Button("Save IR as Asset"))
-                {
                     SaveAsAsset(probe.BakedIR, probe.name);
-                }
             }
         }
 
         void BakeIR(AcousticProbe probe)
         {
             EditorUtility.DisplayProgressBar("AcousticIR", "Baking impulse response...", 0.1f);
-
             try
             {
                 var ir = probe.Bake();
-
                 if (ir != null)
                 {
                     EditorUtility.DisplayProgressBar("AcousticIR", "Bake complete!", 1f);
@@ -92,13 +70,8 @@ namespace AcousticIR.Editor.Inspectors
         {
             string defaultName = $"IR_{irData.SampleRate}Hz_{irData.LengthSeconds:F1}s";
             string path = EditorUtility.SaveFilePanel(
-                "Export IR as WAV",
-                Application.dataPath,
-                defaultName,
-                "wav");
-
-            if (string.IsNullOrEmpty(path))
-                return;
+                "Export IR as WAV", Application.dataPath, defaultName, "wav");
+            if (string.IsNullOrEmpty(path)) return;
 
             if (pcm16)
                 WavExporter.ExportPCM16(irData.Samples, irData.SampleRate, path);
@@ -109,21 +82,14 @@ namespace AcousticIR.Editor.Inspectors
         void SaveAsAsset(IRData irData, string probeName)
         {
             string path = EditorUtility.SaveFilePanelInProject(
-                "Save IR Data Asset",
-                $"IR_{probeName}",
-                "asset",
+                "Save IR Data Asset", $"IR_{probeName}", "asset",
                 "Choose where to save the IR data asset");
+            if (string.IsNullOrEmpty(path)) return;
 
-            if (string.IsNullOrEmpty(path))
-                return;
-
-            // Create a persistent copy
             var copy = Instantiate(irData);
             copy.name = System.IO.Path.GetFileNameWithoutExtension(path);
-
             AssetDatabase.CreateAsset(copy, path);
             AssetDatabase.SaveAssets();
-
             Debug.Log($"[AcousticIR] Saved IR asset: {path}");
         }
     }

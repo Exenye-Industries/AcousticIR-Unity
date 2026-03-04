@@ -4,9 +4,6 @@ using UnityEngine;
 
 namespace AcousticIR.Editor.Inspectors
 {
-    /// <summary>
-    /// Custom inspector for AcousticZone with IR info and quick-assign helpers.
-    /// </summary>
     [CustomEditor(typeof(AcousticZone))]
     public class AcousticZoneEditor : UnityEditor.Editor
     {
@@ -18,7 +15,7 @@ namespace AcousticIR.Editor.Inspectors
 
             EditorGUILayout.Space(10);
 
-            // Validation
+            // Trigger validation
             var col = zone.GetComponent<Collider>();
             if (col != null && !col.isTrigger)
             {
@@ -54,20 +51,8 @@ namespace AcousticIR.Editor.Inspectors
             else
             {
                 EditorGUILayout.HelpBox(
-                    "No IR assigned. Drag an IRData asset to the 'IR Data' field, " +
-                    "or use an AcousticProbe to bake one.",
+                    "No IR assigned. Use an AcousticProbe to bake one, then drag the IR asset here.",
                     MessageType.Warning);
-            }
-
-            // Runtime bake info
-            if (zone.CanRebake)
-            {
-                EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Runtime Baking", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(
-                    "This zone is configured for runtime rebaking.\n" +
-                    $"Source: {zone.BakeSourcePosition}",
-                    MessageType.Info);
             }
         }
     }

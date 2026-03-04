@@ -1,36 +1,72 @@
 using System.Collections.Generic;
-using AcousticIR.Config;
 using AcousticIR.Core;
 using UnityEngine;
 
 namespace AcousticIR.Probes
 {
     /// <summary>
-    /// Acoustic probe component that defines a source/receiver pair for IR baking.
-    /// Place in the scene, configure source and receiver positions, then bake.
-    /// The baked IR can be assigned to AcousticZones or used directly.
+    /// Acoustic probe that bakes impulse responses from scene geometry.
+    /// All settings are directly on this component - just place it, click Bake.
+    /// Works with any Collider in the scene (no AcousticSurface needed for basic use).
     /// </summary>
     public class AcousticProbe : MonoBehaviour
     {
-        [Header("Positions")]
-        [Tooltip("Source position (where the sound originates). If null, uses this transform.")]
-        [SerializeField] Transform sourceTransform;
+        [Header("Ray Parameters")]
+        [Tooltip("Number of rays emitted from the source position")]
+        [Range(64, 65536)]
+        [SerializeField] int rayCount = 4096;
 
-        [Tooltip("Receiver position (where the listener is). If null, uses this transform.")]
-        [SerializeField] Transform receiverTransform;
+        [Tooltip("Maximum number of bounces per ray")]
+        [Range(1, 32)]
+        [SerializeField] int maxBounces = 8;
 
-        [Tooltip("Offset from source transform (if no separate transform is set)")]
-        [SerializeField] Vector3 sourceOffset = Vector3.zero;
+        [Tooltip("Maximum total path length per ray in meters")]
+        [Range(10f, 500f)]
+        [SerializeField] float maxDistance = 100f;
 
-        [Tooltip("Offset from receiver transform (if no separate transform is set)")]
+        [Tooltip("Minimum total band energy before ray termination")]
+        [Range(0.0001f, 0.1f)]
+        [SerializeField] float energyThreshold = 0.001f;
+
+        [Header("Receiver")]
+        [Tooltip("Radius of the receiver capture sphere in meters")]
+        [Range(0.1f, 2f)]
+        [SerializeField] float receiverRadius = 0.5f;
+
+        [Tooltip("Offset from this transform to the receiver position")]
         [SerializeField] Vector3 receiverOffset = new Vector3(0f, 0f, 2f);
 
-        [Header("Configuration")]
-        [Tooltip("Raytracing configuration")]
-        [SerializeField] RaytraceConfig raytraceConfig;
+        [Header("Physics")]
+        [Tooltip("Speed of sound in m/s")]
+        [Range(300f, 400f)]
+        [SerializeField] float speedOfSound = 343f;
 
-        [Tooltip("IR generation configuration")]
-        [SerializeField] IRGenerationConfig irConfig;
+        [Header("Default Surface Material")]
+        [Tooltip("Absorption for surfaces without AcousticSurface component")]
+        [Range(0f, 1f)]
+        [SerializeField] float defaultAbsorption = 0.1f;
+
+        [Tooltip("Diffusion for surfaces without AcousticSurface component")]
+        [Range(0f, 1f)]
+        [SerializeField] float defaultDiffusion = 0.3f;
+
+        [Header("IR Output")]
+        [Tooltip("Sample rate of the generated IR")]
+        [SerializeField] int sampleRate = 48000;
+
+        [Tooltip("Maximum IR length in seconds")]
+        [Range(0.5f, 6f)]
+        [SerializeField] float irLength = 2f;
+
+        [Tooltip("Apply Hann window to IR tail")]
+        [SerializeField] bool applyWindowing = true;
+
+        [Tooltip("Portion of IR tail to window")]
+        [Range(0.05f, 0.3f)]
+        [SerializeField] float windowTailPortion = 0.1f;
+
+        [Tooltip("Synthesize stochastic late reverb tail")]
+        [SerializeField] bool synthesizeLateTail = true;
 
         [Header("Baked Result")]
         [SerializeField] IRData bakedIR;
@@ -38,64 +74,62 @@ namespace AcousticIR.Probes
         /// <summary>The baked IR data, or null if not yet baked.</summary>
         public IRData BakedIR => bakedIR;
 
-        /// <summary>World-space source position.</summary>
-        public Vector3 SourcePosition =>
-            sourceTransform != null
-                ? sourceTransform.position + sourceOffset
-                : transform.position + sourceOffset;
+        /// <summary>World-space source position (this transform's position).</summary>
+        public Vector3 SourcePosition => transform.position;
 
         /// <summary>World-space receiver position.</summary>
-        public Vector3 ReceiverPosition =>
-            receiverTransform != null
-                ? receiverTransform.position + receiverOffset
-                : transform.position + receiverOffset;
+        public Vector3 ReceiverPosition => transform.position + transform.TransformDirection(receiverOffset);
+
+        // Public accessors for editor/inspector
+        public int RayCount => rayCount;
+        public int MaxBounces => maxBounces;
+        public int SampleRate => sampleRate;
+        public float IRLength => irLength;
 
         /// <summary>
         /// Bakes an impulse response from the current scene geometry.
-        /// Collects all AcousticSurface components to build the material mapping.
+        /// Works immediately - no config assets needed.
         /// </summary>
-        /// <param name="targetIR">IRData asset to store the result. If null, creates a new instance.</param>
-        /// <returns>The baked IRData.</returns>
         public IRData Bake(IRData targetIR = null)
         {
-            if (raytraceConfig == null)
-            {
-                Debug.LogError("[AcousticIR] No RaytraceConfig assigned to AcousticProbe.", this);
-                return null;
-            }
-
-            if (irConfig == null)
-            {
-                Debug.LogError("[AcousticIR] No IRGenerationConfig assigned to AcousticProbe.", this);
-                return null;
-            }
-
-            // Build material mapping from all AcousticSurface components in scene
+            // Build material mapping from AcousticSurface components (if any exist)
             var materialList = new List<MaterialData>();
             var colliderMapping = new Dictionary<int, int>();
             CollectMaterials(materialList, colliderMapping);
 
+            // Default material for all surfaces without AcousticSurface
+            var defaultMaterial = new MaterialData
+            {
+                absorption = AbsorptionCoefficients.Uniform(defaultAbsorption),
+                diffusion = defaultDiffusion
+            };
+
             // Set up raytracer
-            var parameters = raytraceConfig.ToParams(SourcePosition, ReceiverPosition);
+            var parameters = new RaytraceParams
+            {
+                sourcePosition = SourcePosition,
+                receiverPosition = ReceiverPosition,
+                receiverRadius = receiverRadius,
+                maxBounces = maxBounces,
+                maxDistance = maxDistance,
+                speedOfSound = speedOfSound,
+                energyThreshold = energyThreshold
+            };
+
             using var raytracer = new AcousticRaytracer(
-                parameters, materialList, colliderMapping, raytraceConfig.DefaultMaterial);
+                parameters, materialList, colliderMapping, defaultMaterial);
 
-            // Trace rays
-            Debug.Log($"[AcousticIR] Baking IR: {raytraceConfig.RayCount} rays, " +
-                      $"{raytraceConfig.MaxBounces} max bounces...");
+            Debug.Log($"[AcousticIR] Baking IR: {rayCount} rays, {maxBounces} bounces, " +
+                      $"source={SourcePosition}, receiver={ReceiverPosition}");
 
-            var arrivals = raytracer.Trace(raytraceConfig.RayCount);
+            var arrivals = raytracer.Trace(rayCount);
 
-            Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals captured.");
+            Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals.");
 
-            // Generate IR from arrivals
+            // Generate IR
             float[] irSamples = IRGenerator.Generate(
-                arrivals,
-                irConfig.SampleRate,
-                irConfig.IRLength,
-                irConfig.ApplyWindowing,
-                irConfig.WindowTailPortion,
-                irConfig.SynthesizeLateTail);
+                arrivals, sampleRate, irLength,
+                applyWindowing, windowTailPortion, synthesizeLateTail);
 
             arrivals.Dispose();
 
@@ -103,41 +137,31 @@ namespace AcousticIR.Probes
             if (targetIR == null)
                 targetIR = ScriptableObject.CreateInstance<IRData>();
 
-            targetIR.SetData(irSamples, irConfig.SampleRate,
-                raytraceConfig.RayCount, raytraceConfig.MaxBounces,
+            targetIR.SetData(irSamples, sampleRate, rayCount, maxBounces,
                 SourcePosition, ReceiverPosition);
 
             bakedIR = targetIR;
 
             Debug.Log($"[AcousticIR] IR generated: {irSamples.Length} samples " +
-                      $"({irConfig.IRLength:F1}s @ {irConfig.SampleRate}Hz)");
+                      $"({irLength:F1}s @ {sampleRate}Hz)");
 
             return targetIR;
         }
 
-        /// <summary>
-        /// Collects all AcousticSurface components in the scene and builds
-        /// the material list and collider-to-material mapping.
-        /// </summary>
         static void CollectMaterials(List<MaterialData> materialList,
             Dictionary<int, int> colliderMapping)
         {
-            // Find all AcousticSurface components
-            // Using FindObjectsByType for Unity 6 compatibility
             var surfaces = FindObjectsByType<Materials.AcousticSurface>(
                 FindObjectsSortMode.None);
 
-            // Build unique material list and mapping
-            var materialIndices = new Dictionary<int, int>(); // material instance ID -> list index
+            var materialIndices = new Dictionary<int, int>();
 
             foreach (var surface in surfaces)
             {
-                if (surface.Material == null)
-                    continue;
+                if (surface.Material == null) continue;
 
                 var collider = surface.GetComponent<Collider>();
-                if (collider == null)
-                    continue;
+                if (collider == null) continue;
 
                 int matInstanceId = surface.Material.GetInstanceID();
 
@@ -154,18 +178,17 @@ namespace AcousticIR.Probes
 
         void OnDrawGizmosSelected()
         {
-            // Source sphere (green)
+            // Source (green)
             Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.5f);
             Gizmos.DrawSphere(SourcePosition, 0.15f);
             Gizmos.DrawWireSphere(SourcePosition, 0.15f);
 
-            // Receiver sphere (blue)
+            // Receiver (blue)
             Gizmos.color = new Color(0.2f, 0.4f, 0.9f, 0.5f);
-            float receiverRadius = raytraceConfig != null ? raytraceConfig.ReceiverRadius : 0.5f;
             Gizmos.DrawWireSphere(ReceiverPosition, receiverRadius);
             Gizmos.DrawSphere(ReceiverPosition, 0.1f);
 
-            // Line connecting source and receiver
+            // Connection line
             Gizmos.color = new Color(1f, 1f, 0.2f, 0.4f);
             Gizmos.DrawLine(SourcePosition, ReceiverPosition);
         }

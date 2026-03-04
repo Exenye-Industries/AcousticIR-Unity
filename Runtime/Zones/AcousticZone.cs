@@ -1,6 +1,4 @@
-using AcousticIR.Config;
 using AcousticIR.Core;
-using AcousticIR.Probes;
 using UnityEngine;
 
 namespace AcousticIR.Zones
@@ -29,15 +27,6 @@ namespace AcousticIR.Zones
         [Range(0f, 1f)]
         [SerializeField] float volume = 1f;
 
-        [Header("Runtime Baking (Optional)")]
-        [Tooltip("If set, the zone can rebake its IR at runtime using this config.")]
-        [SerializeField] RaytraceConfig runtimeRaytraceConfig;
-
-        [SerializeField] IRGenerationConfig runtimeIRConfig;
-
-        [Tooltip("Source position for runtime baking (if null, uses zone center).")]
-        [SerializeField] Transform sourceOverride;
-
         /// <summary>The IR data for this zone.</summary>
         public IRData IR
         {
@@ -57,22 +46,8 @@ namespace AcousticIR.Zones
         /// <summary>Whether this zone has a valid IR assigned.</summary>
         public bool HasIR => irData != null && irData.SampleCount > 0;
 
-        /// <summary>Can this zone rebake at runtime?</summary>
-        public bool CanRebake => runtimeRaytraceConfig != null && runtimeIRConfig != null;
-
-        /// <summary>The source position for runtime baking.</summary>
-        public Vector3 BakeSourcePosition =>
-            sourceOverride != null ? sourceOverride.position : transform.position;
-
-        /// <summary>Raytrace config for runtime baking.</summary>
-        public RaytraceConfig RuntimeRaytraceConfig => runtimeRaytraceConfig;
-
-        /// <summary>IR generation config for runtime baking.</summary>
-        public IRGenerationConfig RuntimeIRConfig => runtimeIRConfig;
-
         void Reset()
         {
-            // Ensure the collider is set to trigger
             var col = GetComponent<Collider>();
             if (col != null)
                 col.isTrigger = true;
@@ -90,7 +65,6 @@ namespace AcousticIR.Zones
 
         void OnDrawGizmos()
         {
-            // Draw zone bounds with color based on priority
             Gizmos.color = HasIR
                 ? new Color(0.2f, 0.6f, 1f, 0.1f)
                 : new Color(1f, 0.3f, 0.2f, 0.1f);
@@ -126,7 +100,6 @@ namespace AcousticIR.Zones
                 Gizmos.matrix = Matrix4x4.identity;
             }
 
-            // Draw priority label in scene view
 #if UNITY_EDITOR
             UnityEditor.Handles.Label(transform.position,
                 $"Zone: P{priority}" + (HasIR ? " [IR]" : " [No IR]"));

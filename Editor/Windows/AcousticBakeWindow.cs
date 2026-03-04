@@ -1,5 +1,3 @@
-using AcousticIR.Config;
-using AcousticIR.Core;
 using AcousticIR.Probes;
 using UnityEditor;
 using UnityEngine;
@@ -7,17 +5,11 @@ using UnityEngine;
 namespace AcousticIR.Editor.Windows
 {
     /// <summary>
-    /// Editor window for batch-baking impulse responses from all AcousticProbes in the scene.
-    /// Provides quality presets, progress tracking, and batch operations.
+    /// Editor window for batch-baking all AcousticProbes in the scene.
+    /// Each probe has its own settings - this just provides batch bake + export.
     /// </summary>
     public class AcousticBakeWindow : EditorWindow
     {
-        // Quality presets
-        enum BakeQuality { Draft, Medium, High, Ultra }
-
-        [SerializeField] BakeQuality quality = BakeQuality.Medium;
-        [SerializeField] RaytraceConfig customRaytraceConfig;
-        [SerializeField] IRGenerationConfig customIRConfig;
         [SerializeField] string exportFolder;
         [SerializeField] bool autoExportWav;
 
@@ -31,18 +23,11 @@ namespace AcousticIR.Editor.Windows
         static void ShowWindow()
         {
             var window = GetWindow<AcousticBakeWindow>("Acoustic Bake");
-            window.minSize = new Vector2(350, 400);
+            window.minSize = new Vector2(350, 300);
         }
 
-        void OnEnable()
-        {
-            RefreshProbeList();
-        }
-
-        void OnFocus()
-        {
-            RefreshProbeList();
-        }
+        void OnEnable() => RefreshProbeList();
+        void OnFocus() => RefreshProbeList();
 
         void RefreshProbeList()
         {
@@ -55,39 +40,11 @@ namespace AcousticIR.Editor.Windows
             EditorGUILayout.LabelField("Acoustic IR Bake", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
 
-            // Quality preset
-            DrawQualitySettings();
-
-            EditorGUILayout.Space(10);
-
-            // Probe list
             DrawProbeList();
-
             EditorGUILayout.Space(10);
-
-            // Export settings
             DrawExportSettings();
-
             EditorGUILayout.Space(10);
-
-            // Bake buttons
             DrawBakeButtons();
-        }
-
-        void DrawQualitySettings()
-        {
-            EditorGUILayout.LabelField("Quality Settings", EditorStyles.boldLabel);
-
-            quality = (BakeQuality)EditorGUILayout.EnumPopup("Preset", quality);
-
-            EditorGUILayout.HelpBox(GetQualityDescription(quality), MessageType.Info);
-
-            EditorGUILayout.Space(5);
-            EditorGUILayout.LabelField("Custom Config Override", EditorStyles.miniLabel);
-            customRaytraceConfig = (RaytraceConfig)EditorGUILayout.ObjectField(
-                "Raytrace Config", customRaytraceConfig, typeof(RaytraceConfig), false);
-            customIRConfig = (IRGenerationConfig)EditorGUILayout.ObjectField(
-                "IR Config", customIRConfig, typeof(IRGenerationConfig), false);
         }
 
         void DrawProbeList()
@@ -99,8 +56,7 @@ namespace AcousticIR.Editor.Windows
             if (probesInScene == null || probesInScene.Length == 0)
             {
                 EditorGUILayout.HelpBox(
-                    "No AcousticProbes found in the scene.\n" +
-                    "Add probes via GameObject > AcousticIR > Acoustic Probe.",
+                    "No AcousticProbes in scene.\nGameObject > AcousticIR > Acoustic Probe",
                     MessageType.Warning);
                 return;
             }
@@ -114,35 +70,24 @@ namespace AcousticIR.Editor.Windows
 
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
 
-                // Status icon
                 bool hasBakedIR = probe.BakedIR != null && probe.BakedIR.SampleCount > 0;
                 GUILayout.Label(hasBakedIR ? "OK" : "--", GUILayout.Width(24));
 
-                // Probe name
                 if (GUILayout.Button(probe.name, EditorStyles.linkLabel))
                 {
                     Selection.activeGameObject = probe.gameObject;
                     EditorGUIUtility.PingObject(probe);
                 }
 
-                // IR info
                 if (hasBakedIR)
-                {
-                    GUILayout.Label(
-                        $"{probe.BakedIR.LengthSeconds:F1}s | {probe.BakedIR.RayCount} rays",
+                    GUILayout.Label($"{probe.BakedIR.LengthSeconds:F1}s | {probe.BakedIR.RayCount} rays",
                         EditorStyles.miniLabel, GUILayout.Width(120));
-                }
                 else
-                {
-                    GUILayout.Label("Not baked", EditorStyles.miniLabel, GUILayout.Width(120));
-                }
+                    GUILayout.Label($"{probe.RayCount} rays", EditorStyles.miniLabel, GUILayout.Width(120));
 
-                // Individual bake button
                 GUI.enabled = !isBaking;
                 if (GUILayout.Button("Bake", GUILayout.Width(50)))
-                {
                     BakeSingleProbe(probe);
-                }
                 GUI.enabled = true;
 
                 EditorGUILayout.EndHorizontal();
@@ -153,8 +98,6 @@ namespace AcousticIR.Editor.Windows
 
         void DrawExportSettings()
         {
-            EditorGUILayout.LabelField("Export Settings", EditorStyles.boldLabel);
-
             autoExportWav = EditorGUILayout.Toggle("Auto-Export WAV", autoExportWav);
 
             if (autoExportWav)
@@ -163,8 +106,7 @@ namespace AcousticIR.Editor.Windows
                 exportFolder = EditorGUILayout.TextField("Export Folder", exportFolder);
                 if (GUILayout.Button("...", GUILayout.Width(30)))
                 {
-                    string folder = EditorUtility.OpenFolderPanel(
-                        "Select WAV Export Folder", exportFolder, "");
+                    string folder = EditorUtility.OpenFolderPanel("WAV Export Folder", exportFolder, "");
                     if (!string.IsNullOrEmpty(folder))
                         exportFolder = folder;
                 }
@@ -178,28 +120,23 @@ namespace AcousticIR.Editor.Windows
 
             GUI.backgroundColor = new Color(0.3f, 0.8f, 0.3f);
             if (GUILayout.Button("Bake All Probes", GUILayout.Height(35)))
-            {
                 BakeAllProbes();
-            }
             GUI.backgroundColor = Color.white;
 
             GUI.enabled = !isBaking;
 
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Refresh Probe List"))
-                RefreshProbeList();
-            if (GUILayout.Button("Select All Probes"))
-                Selection.objects = GetProbeGameObjects();
+            if (GUILayout.Button("Refresh")) RefreshProbeList();
+            if (GUILayout.Button("Select All Probes")) Selection.objects = GetProbeGameObjects();
             EditorGUILayout.EndHorizontal();
 
             GUI.enabled = true;
 
-            // Progress during bake
             if (isBaking)
             {
                 EditorGUILayout.Space(5);
-                Rect progressRect = EditorGUILayout.GetControlRect(false, 20);
-                EditorGUI.ProgressBar(progressRect, bakeProgress,
+                Rect r = EditorGUILayout.GetControlRect(false, 20);
+                EditorGUI.ProgressBar(r, bakeProgress,
                     $"Baking probe {currentProbeIndex + 1}/{probesInScene.Length}...");
             }
         }
@@ -207,59 +144,45 @@ namespace AcousticIR.Editor.Windows
         void BakeSingleProbe(AcousticProbe probe)
         {
             EditorUtility.DisplayProgressBar("AcousticIR", $"Baking {probe.name}...", 0.2f);
-
             try
             {
                 var ir = probe.Bake();
                 if (ir != null)
                 {
                     EditorUtility.SetDirty(probe);
-
                     if (autoExportWav && !string.IsNullOrEmpty(exportFolder))
-                    {
-                        string path = $"{exportFolder}/IR_{probe.name}.wav";
-                        DSP.WavExporter.ExportFloat32(ir.Samples, ir.SampleRate, path);
-                    }
+                        DSP.WavExporter.ExportFloat32(ir.Samples, ir.SampleRate,
+                            $"{exportFolder}/IR_{probe.name}.wav");
                 }
             }
-            finally
-            {
-                EditorUtility.ClearProgressBar();
-            }
+            finally { EditorUtility.ClearProgressBar(); }
         }
 
         void BakeAllProbes()
         {
             isBaking = true;
-
             try
             {
                 for (int i = 0; i < probesInScene.Length; i++)
                 {
                     currentProbeIndex = i;
                     bakeProgress = (float)i / probesInScene.Length;
-
                     var probe = probesInScene[i];
                     if (probe == null) continue;
 
                     EditorUtility.DisplayProgressBar("AcousticIR",
-                        $"Baking {probe.name} ({i + 1}/{probesInScene.Length})...",
-                        bakeProgress);
+                        $"Baking {probe.name} ({i + 1}/{probesInScene.Length})...", bakeProgress);
 
                     var ir = probe.Bake();
                     if (ir != null)
                     {
                         EditorUtility.SetDirty(probe);
-
                         if (autoExportWav && !string.IsNullOrEmpty(exportFolder))
-                        {
-                            string path = $"{exportFolder}/IR_{probe.name}.wav";
-                            DSP.WavExporter.ExportFloat32(ir.Samples, ir.SampleRate, path);
-                        }
+                            DSP.WavExporter.ExportFloat32(ir.Samples, ir.SampleRate,
+                                $"{exportFolder}/IR_{probe.name}.wav");
                     }
                 }
-
-                Debug.Log($"[AcousticIR] Batch bake complete: {probesInScene.Length} probes processed.");
+                Debug.Log($"[AcousticIR] Batch bake complete: {probesInScene.Length} probes.");
             }
             finally
             {
@@ -276,18 +199,6 @@ namespace AcousticIR.Editor.Windows
             for (int i = 0; i < probesInScene.Length; i++)
                 gos[i] = probesInScene[i].gameObject;
             return gos;
-        }
-
-        static string GetQualityDescription(BakeQuality q)
-        {
-            return q switch
-            {
-                BakeQuality.Draft => "256 rays, 4 bounces - Fast preview (~1s)",
-                BakeQuality.Medium => "2048 rays, 8 bounces - Good quality (~5s)",
-                BakeQuality.High => "8192 rays, 12 bounces - High quality (~20s)",
-                BakeQuality.Ultra => "32768 rays, 16 bounces - Reference quality (~2min)",
-                _ => ""
-            };
         }
     }
 }
