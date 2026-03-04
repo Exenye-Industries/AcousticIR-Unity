@@ -1,0 +1,20 @@
+# Build artifacts
+NativePlugin~/build/
+Runtime/Plugins/x86_64/*.dll
+Runtime/Plugins/x86_64/*.pdb
+Runtime/Plugins/x86_64/*.exp
+Runtime/Plugins/x86_64/*.lib
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+
+# Unity meta files for excluded folders are kept

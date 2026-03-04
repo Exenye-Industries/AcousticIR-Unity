@@ -1,0 +1,33 @@
+{
+    "name": "com.exenye.acoustic-ir",
+    "version": "0.1.0",
+    "displayName": "Acoustic IR - Raytraced Impulse Response",
+    "description": "Custom acoustic raytracing impulse response generation with real-time convolution reverb for Unity. Generates physically accurate IRs from 3D geometry using Burst-compiled ray tracing and plays them back via a native C++ convolution engine.",
+    "unity": "6000.0",
+    "author": {
+        "name": "Exenye Industries",
+        "url": "https://github.com/Exenye-Industries"
+    },
+    "license": "MIT",
+    "dependencies": {
+        "com.unity.burst": "1.8.0",
+        "com.unity.collections": "2.2.0",
+        "com.unity.mathematics": "1.3.1"
+    },
+    "keywords": [
+        "audio",
+        "acoustics",
+        "reverb",
+        "impulse-response",
+        "raytracing",
+        "convolution",
+        "dsp"
+    ],
+    "samples": [
+        {
+            "displayName": "Basic Room",
+            "description": "Simple room with acoustic surfaces, a probe, and zone setup",
+            "path": "Samples~/BasicRoom"
+        }
+    ]
+}
