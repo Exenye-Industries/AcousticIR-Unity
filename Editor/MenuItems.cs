@@ -1,5 +1,6 @@
 using AcousticIR.Materials;
 using AcousticIR.Probes;
+using AcousticIR.Zones;
 using UnityEditor;
 using UnityEngine;
 
@@ -23,7 +24,79 @@ namespace AcousticIR.Editor
             Undo.RegisterCreatedObjectUndo(go, "Create Acoustic Probe");
         }
 
-        [MenuItem("GameObject/AcousticIR/Acoustic Surface", false, 11)]
+        [MenuItem("GameObject/AcousticIR/Acoustic Listener", false, 12)]
+        static void CreateAcousticListener()
+        {
+            var go = new GameObject("AcousticListener");
+            go.AddComponent<AcousticListener>();
+
+            if (Selection.activeTransform != null)
+                go.transform.SetParent(Selection.activeTransform);
+
+            Selection.activeGameObject = go;
+            Undo.RegisterCreatedObjectUndo(go, "Create Acoustic Listener");
+        }
+
+        [MenuItem("GameObject/AcousticIR/Acoustic Zone (Box)", false, 13)]
+        static void CreateAcousticZoneBox()
+        {
+            var go = new GameObject("AcousticZone");
+            var box = go.AddComponent<BoxCollider>();
+            box.isTrigger = true;
+            box.size = new Vector3(10f, 5f, 10f);
+            go.AddComponent<AcousticZone>();
+
+            if (Selection.activeTransform != null)
+                go.transform.SetParent(Selection.activeTransform);
+
+            Selection.activeGameObject = go;
+            Undo.RegisterCreatedObjectUndo(go, "Create Acoustic Zone");
+        }
+
+        [MenuItem("GameObject/AcousticIR/Acoustic Zone Manager", false, 14)]
+        static void CreateAcousticZoneManager()
+        {
+            var go = new GameObject("AcousticZoneManager");
+            go.AddComponent<AcousticZoneManager>();
+            go.AddComponent<AcousticZoneBlender>();
+
+            if (Selection.activeTransform != null)
+                go.transform.SetParent(Selection.activeTransform);
+
+            Selection.activeGameObject = go;
+            Undo.RegisterCreatedObjectUndo(go, "Create Acoustic Zone Manager");
+        }
+
+        [MenuItem("GameObject/AcousticIR/Acoustic Source", false, 15)]
+        static void CreateAcousticSource()
+        {
+            if (Selection.activeGameObject != null)
+            {
+                // Add to selected object if it has an AudioSource
+                var go = Selection.activeGameObject;
+                if (go.GetComponent<AudioSource>() != null)
+                {
+                    if (go.GetComponent<AcousticSource>() == null)
+                    {
+                        Undo.AddComponent<AcousticSource>(go);
+                        return;
+                    }
+                }
+            }
+
+            // Create new object with AudioSource + AcousticSource
+            var newGo = new GameObject("AcousticSource");
+            newGo.AddComponent<AudioSource>();
+            newGo.AddComponent<AcousticSource>();
+
+            if (Selection.activeTransform != null)
+                newGo.transform.SetParent(Selection.activeTransform);
+
+            Selection.activeGameObject = newGo;
+            Undo.RegisterCreatedObjectUndo(newGo, "Create Acoustic Source");
+        }
+
+        [MenuItem("GameObject/AcousticIR/Acoustic Surface", false, 16)]
         static void AddAcousticSurface()
         {
             if (Selection.activeGameObject == null)

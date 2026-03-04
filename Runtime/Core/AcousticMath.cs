@@ -1,4 +1,3 @@
-using Unity.Burst;
 using Unity.Mathematics;
 
 namespace AcousticIR.Core
@@ -6,8 +5,8 @@ namespace AcousticIR.Core
     /// <summary>
     /// Static math utilities for acoustic raytracing.
     /// All methods are Burst-compatible (no managed allocations).
+    /// When called from a [BurstCompile] job, these are automatically Burst-compiled.
     /// </summary>
-    [BurstCompile]
     public static class AcousticMath
     {
         /// <summary>
@@ -22,7 +21,6 @@ namespace AcousticIR.Core
         /// <param name="index">Ray index (0 to totalPoints-1).</param>
         /// <param name="totalPoints">Total number of points to distribute.</param>
         /// <returns>Unit vector direction on the sphere.</returns>
-        [BurstCompile]
         public static float3 FibonacciSpherePoint(int index, int totalPoints)
         {
             float theta = 2f * math.PI * index / GoldenRatio;
@@ -40,7 +38,6 @@ namespace AcousticIR.Core
         /// Specular reflection: r = d - 2(d.n)n.
         /// Standard mirror reflection off a surface.
         /// </summary>
-        [BurstCompile]
         public static float3 Reflect(float3 direction, float3 normal)
         {
             return direction - 2f * math.dot(direction, normal) * normal;
@@ -50,7 +47,6 @@ namespace AcousticIR.Core
         /// Cosine-weighted diffuse reflection in the hemisphere around the normal.
         /// Physically correct Lambertian scattering distribution.
         /// </summary>
-        [BurstCompile]
         public static float3 DiffuseReflect(float3 normal, ref Random rng)
         {
             float u1 = rng.NextFloat();
@@ -77,7 +73,6 @@ namespace AcousticIR.Core
         /// Hybrid reflection blending between specular and diffuse based on material diffusion.
         /// diffusion=0: perfect mirror, diffusion=1: fully Lambertian.
         /// </summary>
-        [BurstCompile]
         public static float3 HybridReflect(float3 direction, float3 normal,
             float diffusion, ref Random rng)
         {
@@ -89,9 +84,8 @@ namespace AcousticIR.Core
         /// <summary>
         /// Calculates air absorption per meter for each frequency band.
         /// Higher frequencies are absorbed more by air.
-        /// Based on ISO 9613-1 simplified model at 20°C, 50% humidity.
+        /// Based on ISO 9613-1 simplified model at 20C, 50% humidity.
         /// </summary>
-        [BurstCompile]
         public static AbsorptionCoefficients AirAbsorption(float distance)
         {
             // Absorption coefficients in dB/meter (simplified)
@@ -119,12 +113,11 @@ namespace AcousticIR.Core
         /// Applies distance attenuation (inverse square law) and air absorption
         /// to the energy of a ray segment.
         /// </summary>
-        [BurstCompile]
         public static AbsorptionCoefficients AttenuateByDistance(
             AbsorptionCoefficients energy, float distance)
         {
-            // Inverse square law: energy falls off with 1/r²
-            // We use 1/(1+r)² to avoid division by zero at very short distances
+            // Inverse square law: energy falls off with 1/r^2
+            // We use 1/(1+r)^2 to avoid division by zero at very short distances
             float distanceFactor = 1f / ((1f + distance) * (1f + distance));
 
             // Air absorption (frequency-dependent)
@@ -146,7 +139,6 @@ namespace AcousticIR.Core
         /// passes through or near a sphere at receiverPos with given radius.
         /// Returns the closest approach distance if within radius, -1 otherwise.
         /// </summary>
-        [BurstCompile]
         public static float CheckReceiverIntersection(
             float3 rayOrigin, float3 rayDirection, float rayLength,
             float3 receiverPos, float receiverRadius)
@@ -192,7 +184,6 @@ namespace AcousticIR.Core
         /// Sinc function for sub-sample interpolation.
         /// sinc(x) = sin(pi*x) / (pi*x), sinc(0) = 1
         /// </summary>
-        [BurstCompile]
         public static float Sinc(float x)
         {
             if (math.abs(x) < 1e-6f)
