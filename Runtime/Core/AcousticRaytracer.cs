@@ -124,7 +124,7 @@ namespace AcousticIR.Core
                 var processHandle = processJob.Schedule(count, 64);
                 processHandle.Complete();
 
-                // 4. Collect arrivals
+                // 4. Collect stochastic arrivals (rays that happened to pass through receiver)
                 var collectJob = new CollectArrivalsJob
                 {
                     sparseArrivals = sparseArrivals,
@@ -133,7 +133,57 @@ namespace AcousticIR.Core
                 };
                 collectJob.Run();
 
-                // 5. Compact surviving rays
+                // 5. NEXT EVENT ESTIMATION (NEE)
+                // For each surviving ray, shoot a shadow ray toward the receiver.
+                // If unobstructed, record a weighted arrival.
+                var neeCommands = new NativeArray<RaycastCommand>(count, Allocator.TempJob);
+                var neeHitResults = new NativeArray<RaycastHit>(count, Allocator.TempJob);
+
+                var buildNEEJob = new BuildNEECommandsJob
+                {
+                    updatedRays = updatedRays,
+                    aliveFlags = aliveFlags,
+                    receiverPosition = parameters.receiverPosition,
+                    neeCommands = neeCommands
+                };
+                buildNEEJob.Schedule(count, 64).Complete();
+
+                // Schedule NEE shadow raycasts
+                var neeRaycastHandle = RaycastCommand.ScheduleBatch(
+                    neeCommands, neeHitResults, 32);
+                neeRaycastHandle.Complete();
+
+                // Process NEE results
+                var neeArrivals = new NativeArray<RayArrival>(count, Allocator.TempJob);
+                var neeArrivalFlags = new NativeArray<int>(count, Allocator.TempJob);
+
+                var processNEEJob = new ProcessNEEJob
+                {
+                    updatedRays = updatedRays,
+                    aliveFlags = aliveFlags,
+                    neeHitResults = neeHitResults,
+                    parameters = parameters,
+                    neeArrivals = neeArrivals,
+                    neeArrivalFlags = neeArrivalFlags
+                };
+                processNEEJob.Schedule(count, 64).Complete();
+
+                // Collect NEE arrivals
+                var collectNEEJob = new CollectArrivalsJob
+                {
+                    sparseArrivals = neeArrivals,
+                    arrivalFlags = neeArrivalFlags,
+                    collectedArrivals = allArrivals
+                };
+                collectNEEJob.Run();
+
+                // Dispose NEE temporaries
+                neeCommands.Dispose();
+                neeHitResults.Dispose();
+                neeArrivals.Dispose();
+                neeArrivalFlags.Dispose();
+
+                // 6. Compact surviving rays
                 var compactedRays = new NativeList<ActiveRay>(count, Allocator.TempJob);
                 var compactJob = new CompactRaysJob
                 {
@@ -234,6 +284,31 @@ namespace AcousticIR.Core
                         dir = AcousticMath.HybridReflect(dir, normal, mat.diffusion, ref rng);
                         origin = hitPoint + normal * 0.001f;
                         totalDist += hitDist;
+
+                        // NEE: Check line of sight from bounce point to receiver
+                        float3 toRec = parameters.receiverPosition - origin;
+                        float distToRec = math.length(toRec);
+                        if (distToRec > 0.05f)
+                        {
+                            float3 dirToRec = toRec / distToRec;
+                            bool neeBlocked = Physics.Raycast(
+                                new Ray((Vector3)origin, (Vector3)dirToRec),
+                                out RaycastHit neeHit, distToRec - 0.05f);
+
+                            if (!neeBlocked)
+                            {
+                                // Clear line of sight - draw yellow NEE shadow ray
+                                segments.Add(new DebugRaySegment
+                                {
+                                    start = (Vector3)origin,
+                                    end = (Vector3)parameters.receiverPosition,
+                                    energy = energy.TotalEnergy * 0.5f,
+                                    rayIndex = i,
+                                    bounce = bounce,
+                                    hitReceiver = true
+                                });
+                            }
+                        }
                     }
                     else
                     {

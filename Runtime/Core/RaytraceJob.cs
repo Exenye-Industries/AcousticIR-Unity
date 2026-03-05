@@ -163,6 +163,141 @@ namespace AcousticIR.Core
         }
     }
 
+    // ========================================================================
+    // NEXT EVENT ESTIMATION (NEE)
+    // After each bounce, shoot a shadow ray from each bounce point directly
+    // toward the receiver. If the ray has clear line of sight, record an
+    // arrival weighted by the solid angle of the receiver sphere.
+    // This dramatically increases the number of useful arrivals.
+    // ========================================================================
+
+    /// <summary>
+    /// Builds RaycastCommands for NEE shadow rays.
+    /// For each alive ray (that just bounced), creates a command from the
+    /// bounce point toward the receiver center.
+    /// </summary>
+    [BurstCompile]
+    public struct BuildNEECommandsJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<ActiveRay> updatedRays;
+        [ReadOnly] public NativeArray<int> aliveFlags;
+        public float3 receiverPosition;
+
+        [WriteOnly] public NativeArray<RaycastCommand> neeCommands;
+
+        public void Execute(int index)
+        {
+            if (aliveFlags[index] == 0)
+            {
+                // Dead ray - create a zero-length dummy command
+                neeCommands[index] = new RaycastCommand(
+                    new float3(0, -10000, 0), new float3(0, 1, 0),
+                    QueryParameters.Default, 0.001f);
+                return;
+            }
+
+            ActiveRay ray = updatedRays[index];
+            float3 toReceiver = receiverPosition - ray.origin;
+            float dist = math.length(toReceiver);
+
+            if (dist < 0.01f)
+            {
+                // Receiver basically at bounce point - skip
+                neeCommands[index] = new RaycastCommand(
+                    new float3(0, -10000, 0), new float3(0, 1, 0),
+                    QueryParameters.Default, 0.001f);
+                return;
+            }
+
+            float3 dir = toReceiver / dist;
+
+            neeCommands[index] = new RaycastCommand(
+                ray.origin, dir, QueryParameters.Default, dist);
+        }
+    }
+
+    /// <summary>
+    /// Processes NEE shadow ray results.
+    /// If a shadow ray reaches the receiver without obstruction, records an arrival
+    /// weighted by the geometric solid angle fraction of the receiver sphere.
+    /// </summary>
+    [BurstCompile]
+    public struct ProcessNEEJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<ActiveRay> updatedRays;
+        [ReadOnly] public NativeArray<int> aliveFlags;
+        [ReadOnly] public NativeArray<RaycastHit> neeHitResults;
+        [ReadOnly] public RaytraceParams parameters;
+
+        [WriteOnly] public NativeArray<RayArrival> neeArrivals;
+        [WriteOnly] public NativeArray<int> neeArrivalFlags;
+
+        public void Execute(int index)
+        {
+            neeArrivalFlags[index] = 0;
+
+            if (aliveFlags[index] == 0)
+                return;
+
+            ActiveRay ray = updatedRays[index];
+            RaycastHit shadowHit = neeHitResults[index];
+
+            float3 toReceiver = parameters.receiverPosition - ray.origin;
+            float distToReceiver = math.length(toReceiver);
+
+            // Skip if receiver is basically at the bounce point
+            if (distToReceiver < 0.05f)
+                return;
+
+            // Skip if total path would exceed max distance
+            float totalDist = ray.totalDistance + distToReceiver;
+            if (totalDist > parameters.maxDistance)
+                return;
+
+            // Check if shadow ray hit something BEFORE reaching the receiver
+            bool blocked = shadowHit.colliderInstanceID != 0
+                && shadowHit.distance < (distToReceiver - 0.05f);
+
+            if (blocked)
+                return; // No line of sight
+
+            // === Clear line of sight! Record NEE arrival. ===
+
+            // Geometric weight: solid angle fraction of receiver sphere
+            // Ω = π*r² / d² (solid angle of disc approximation for small angles)
+            // Fraction of hemisphere: Ω / (2π) = r² / (2*d²)
+            float rr = parameters.receiverRadius * parameters.receiverRadius;
+            float dd = distToReceiver * distToReceiver;
+            float solidAngleWeight = rr / (2f * dd);
+
+            // Apply air absorption for the shadow ray segment
+            AbsorptionCoefficients attenuated = AcousticMath.ApplyAirAbsorption(
+                ray.bandEnergy, distToReceiver);
+
+            // Scale by solid angle weight (how much energy actually reaches the receiver)
+            AbsorptionCoefficients weighted = new AbsorptionCoefficients
+            {
+                band125Hz = attenuated.band125Hz * solidAngleWeight,
+                band250Hz = attenuated.band250Hz * solidAngleWeight,
+                band500Hz = attenuated.band500Hz * solidAngleWeight,
+                band1kHz = attenuated.band1kHz * solidAngleWeight,
+                band2kHz = attenuated.band2kHz * solidAngleWeight,
+                band4kHz = attenuated.band4kHz * solidAngleWeight
+            };
+
+            float3 dir = toReceiver / distToReceiver;
+
+            neeArrivals[index] = new RayArrival
+            {
+                time = totalDist / parameters.speedOfSound,
+                bandEnergy = weighted,
+                direction = dir,
+                bounceCount = ray.bounceCount
+            };
+            neeArrivalFlags[index] = 1;
+        }
+    }
+
     /// <summary>
     /// Job to compact the active ray list by removing dead rays.
     /// Uses the aliveFlags from ProcessBounceJob to build a compacted list.
