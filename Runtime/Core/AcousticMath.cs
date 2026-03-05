@@ -165,6 +165,27 @@ namespace AcousticIR.Core
         }
 
         /// <summary>
+        /// Applies only air absorption (frequency-dependent) without geometric distance falloff.
+        /// In stochastic ray tracing, geometric spreading (1/r²) is implicitly handled by
+        /// the receiver sphere geometry - fewer rays hit the receiver at greater distances.
+        /// Applying explicit 1/r² would double-count the distance attenuation.
+        /// </summary>
+        public static AbsorptionCoefficients ApplyAirAbsorption(
+            AbsorptionCoefficients energy, float distance)
+        {
+            AbsorptionCoefficients airAbs = AirAbsorption(distance);
+            return new AbsorptionCoefficients
+            {
+                band125Hz = energy.band125Hz * airAbs.band125Hz,
+                band250Hz = energy.band250Hz * airAbs.band250Hz,
+                band500Hz = energy.band500Hz * airAbs.band500Hz,
+                band1kHz = energy.band1kHz * airAbs.band1kHz,
+                band2kHz = energy.band2kHz * airAbs.band2kHz,
+                band4kHz = energy.band4kHz * airAbs.band4kHz
+            };
+        }
+
+        /// <summary>
         /// Applies a Hann window to the tail portion of an IR buffer.
         /// </summary>
         public static void ApplyHannWindow(float[] buffer, float tailPortion)

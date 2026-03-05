@@ -1,3 +1,4 @@
+using UnityEngine;
 using Unity.Mathematics;
 
 namespace AcousticIR.Core
@@ -143,6 +144,20 @@ namespace AcousticIR.Core
 
         /// <summary>Minimum total band energy before ray termination.</summary>
         public float energyThreshold;
+    }
+
+    /// <summary>
+    /// Debug visualization data for a single ray segment.
+    /// Used to draw ray paths in the Scene view.
+    /// </summary>
+    public struct DebugRaySegment
+    {
+        public Vector3 start;
+        public Vector3 end;
+        public float energy;
+        public int rayIndex;
+        public int bounce;
+        public bool hitReceiver;
     }
 
     /// <summary>

@@ -73,9 +73,9 @@ namespace AcousticIR.Core
                 if (receiverDist >= 0f)
                 {
                     float totalDist = ray.totalDistance + receiverDist;
-                    // Only attenuate by the last segment (receiverDist), not the total path.
-                    // ray.bandEnergy already includes attenuation from all previous bounces.
-                    AbsorptionCoefficients attenuated = AcousticMath.AttenuateByDistance(
+                    // Only apply air absorption for the last segment.
+                    // Geometric 1/r² is implicitly handled by receiver sphere geometry.
+                    AbsorptionCoefficients attenuated = AcousticMath.ApplyAirAbsorption(
                         ray.bandEnergy, receiverDist);
 
                     arrivals[index] = new RayArrival
@@ -107,9 +107,9 @@ namespace AcousticIR.Core
             if (recDist >= 0f)
             {
                 float arrivalTotalDist = ray.totalDistance + recDist;
-                // Only attenuate by the last segment (recDist), not the total path.
-                // ray.bandEnergy already includes attenuation from all previous bounces.
-                AbsorptionCoefficients attenuated = AcousticMath.AttenuateByDistance(
+                // Only apply air absorption for the last segment.
+                // Geometric 1/r² is implicitly handled by receiver sphere geometry.
+                AbsorptionCoefficients attenuated = AcousticMath.ApplyAirAbsorption(
                     ray.bandEnergy, recDist);
 
                 arrivals[index] = new RayArrival
@@ -133,8 +133,8 @@ namespace AcousticIR.Core
             // Apply surface absorption (frequency-dependent)
             AbsorptionCoefficients reflected = mat.absorption.Reflect(ray.bandEnergy);
 
-            // Apply distance attenuation for this segment
-            reflected = AcousticMath.AttenuateByDistance(reflected, hitDistance);
+            // Apply air absorption for this segment (no 1/r² - handled by receiver geometry)
+            reflected = AcousticMath.ApplyAirAbsorption(reflected, hitDistance);
 
             // Check if ray has enough energy to continue
             if (reflected.TotalEnergy < parameters.energyThreshold ||

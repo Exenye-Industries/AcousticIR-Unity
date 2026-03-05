@@ -68,8 +68,19 @@ namespace AcousticIR.Probes
         [Tooltip("Synthesize stochastic late reverb tail")]
         [SerializeField] bool synthesizeLateTail = true;
 
+        [Header("Debug Visualization")]
+        [Tooltip("Show debug rays in Scene view after baking")]
+        [SerializeField] bool showDebugRays = true;
+
+        [Tooltip("Number of debug rays to visualize (keep low for performance)")]
+        [Range(16, 256)]
+        [SerializeField] int debugRayCount = 64;
+
         [Header("Baked Result")]
         [SerializeField] IRData bakedIR;
+
+        /// <summary>Debug ray segments from last bake (not serialized).</summary>
+        [System.NonSerialized] public List<DebugRaySegment> lastDebugRays;
 
         /// <summary>The baked IR data, or null if not yet baked.</summary>
         public IRData BakedIR => bakedIR;
@@ -125,6 +136,14 @@ namespace AcousticIR.Probes
             var arrivals = raytracer.Trace(rayCount);
 
             Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals.");
+            LogArrivalStatistics(arrivals);
+
+            // Debug ray visualization
+            if (showDebugRays && debugRayCount > 0)
+            {
+                lastDebugRays = raytracer.TraceDebug(debugRayCount);
+                Debug.Log($"[AcousticIR] Debug rays: {lastDebugRays.Count} segments from {debugRayCount} rays.");
+            }
 
             // Generate IR
             float[] irSamples = IRGenerator.Generate(
@@ -176,6 +195,43 @@ namespace AcousticIR.Probes
             }
         }
 
+        void LogArrivalStatistics(Unity.Collections.NativeList<RayArrival> arrivals)
+        {
+            if (arrivals.Length == 0)
+            {
+                Debug.LogWarning("[AcousticIR] No arrivals - check scene geometry and receiver position.");
+                return;
+            }
+
+            float minTime = float.MaxValue, maxTime = 0f;
+            float minEnergy = float.MaxValue, maxEnergy = 0f;
+            int[] bounceCounts = new int[maxBounces + 1];
+
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                var a = arrivals[i];
+                if (a.time < minTime) minTime = a.time;
+                if (a.time > maxTime) maxTime = a.time;
+                float e = a.bandEnergy.TotalEnergy;
+                if (e < minEnergy) minEnergy = e;
+                if (e > maxEnergy) maxEnergy = e;
+                if (a.bounceCount >= 0 && a.bounceCount <= maxBounces)
+                    bounceCounts[a.bounceCount]++;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[AcousticIR] Arrival statistics ({arrivals.Length} arrivals):");
+            sb.AppendLine($"  Time range: {minTime * 1000:F1}ms - {maxTime * 1000:F1}ms");
+            sb.AppendLine($"  Energy range: {minEnergy:F6} - {maxEnergy:F6}");
+            sb.Append("  Per bounce:");
+            for (int b = 0; b <= maxBounces; b++)
+            {
+                if (bounceCounts[b] > 0)
+                    sb.Append($" B{b}:{bounceCounts[b]}");
+            }
+            Debug.Log(sb.ToString());
+        }
+
         void OnDrawGizmosSelected()
         {
             // Source (green)
@@ -191,6 +247,39 @@ namespace AcousticIR.Probes
             // Connection line
             Gizmos.color = new Color(1f, 1f, 0.2f, 0.4f);
             Gizmos.DrawLine(SourcePosition, ReceiverPosition);
+
+            // Debug rays
+            if (showDebugRays && lastDebugRays != null && lastDebugRays.Count > 0)
+                DrawDebugRays();
+        }
+
+        void DrawDebugRays()
+        {
+            float maxEnergy = 0f;
+            foreach (var seg in lastDebugRays)
+                if (seg.energy > maxEnergy) maxEnergy = seg.energy;
+            if (maxEnergy < 1e-8f) maxEnergy = 1f;
+
+            foreach (var seg in lastDebugRays)
+            {
+                float t = seg.energy / maxEnergy;
+
+                if (seg.hitReceiver)
+                {
+                    // Receiver hit: bright cyan
+                    Gizmos.color = new Color(0f, 1f, 1f, 0.9f);
+                }
+                else
+                {
+                    // Energy gradient: green (high) -> yellow -> red (low)
+                    float r = 1f - t;
+                    float g = t;
+                    float alpha = 0.15f + t * 0.6f;
+                    Gizmos.color = new Color(r, g, 0f, alpha);
+                }
+
+                Gizmos.DrawLine(seg.start, seg.end);
+            }
         }
     }
 }
