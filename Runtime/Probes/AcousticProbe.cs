@@ -133,6 +133,9 @@ namespace AcousticIR.Probes
             Debug.Log($"[AcousticIR] Baking IR: {rayCount} rays, {maxBounces} bounces, " +
                       $"source={SourcePosition}, receiver={ReceiverPosition}");
 
+            // Pre-bake geometry diagnostic
+            DiagnoseGeometry(SourcePosition);
+
             var arrivals = raytracer.Trace(rayCount);
 
             Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals.");
@@ -196,6 +199,86 @@ namespace AcousticIR.Probes
                 }
 
                 colliderMapping[collider.GetInstanceID()] = matIndex;
+            }
+        }
+
+        /// <summary>
+        /// Pre-bake diagnostic: checks if there's actually any geometry around the probe
+        /// that rays can bounce off. Fires 26 test rays and counts colliders.
+        /// </summary>
+        void DiagnoseGeometry(Vector3 sourcePos)
+        {
+            // Count colliders in scene
+            var allColliders = FindObjectsByType<Collider>(FindObjectsSortMode.None);
+            var meshColliders = FindObjectsByType<MeshCollider>(FindObjectsSortMode.None);
+
+            // Find nearest colliders with OverlapSphere
+            var nearby = Physics.OverlapSphere(sourcePos, maxDistance);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("========================================");
+            sb.AppendLine("[AcousticIR] GEOMETRY DIAGNOSTIC");
+            sb.AppendLine("========================================");
+            sb.AppendLine($"  Scene colliders: {allColliders.Length} total, {meshColliders.Length} MeshColliders");
+            sb.AppendLine($"  Within {maxDistance}m of source: {nearby.Length} colliders");
+
+            // Fire test rays in 26 directions (6 axis + 8 corners + 12 edges)
+            Vector3[] testDirs = {
+                Vector3.up, Vector3.down, Vector3.left, Vector3.right, Vector3.forward, Vector3.back,
+                new Vector3(1,1,1).normalized, new Vector3(-1,1,1).normalized,
+                new Vector3(1,-1,1).normalized, new Vector3(-1,-1,1).normalized,
+                new Vector3(1,1,-1).normalized, new Vector3(-1,1,-1).normalized,
+                new Vector3(1,-1,-1).normalized, new Vector3(-1,-1,-1).normalized,
+            };
+            int hitCount = 0;
+            float nearestHit = float.MaxValue;
+            float farthestHit = 0f;
+            string nearestName = "";
+
+            foreach (var dir in testDirs)
+            {
+                if (Physics.Raycast(sourcePos, dir, out RaycastHit hit, maxDistance))
+                {
+                    hitCount++;
+                    if (hit.distance < nearestHit)
+                    {
+                        nearestHit = hit.distance;
+                        nearestName = hit.collider.gameObject.name;
+                    }
+                    if (hit.distance > farthestHit) farthestHit = hit.distance;
+
+                    // Draw test ray as yellow (hit) in Scene view
+                    Debug.DrawLine(sourcePos, hit.point, Color.yellow, 30f);
+                    Debug.DrawLine(hit.point, hit.point + hit.normal * 0.3f, Color.magenta, 30f);
+                }
+                else
+                {
+                    // Draw test ray as red (missed) in Scene view
+                    Debug.DrawLine(sourcePos, sourcePos + dir * 15f, new Color(1f, 0f, 0f, 0.3f), 30f);
+                }
+            }
+
+            sb.AppendLine($"  Test rays: {hitCount}/{testDirs.Length} hit geometry");
+            if (hitCount > 0)
+            {
+                sb.AppendLine($"  Nearest surface: {nearestHit:F1}m ({nearestName})");
+                sb.AppendLine($"  Farthest surface: {farthestHit:F1}m");
+            }
+
+            if (hitCount == 0)
+            {
+                sb.AppendLine("  *** NO GEOMETRY FOUND! Rays have nothing to bounce off! ***");
+                sb.AppendLine("  Check: Are MeshColliders on the chunks? Is the probe inside geometry?");
+                Debug.LogError(sb.ToString());
+            }
+            else if (hitCount < testDirs.Length / 2)
+            {
+                sb.AppendLine($"  WARNING: Only {hitCount}/{testDirs.Length} directions have geometry (open space)");
+                Debug.LogWarning(sb.ToString());
+            }
+            else
+            {
+                Debug.Log(sb.ToString());
             }
         }
 
