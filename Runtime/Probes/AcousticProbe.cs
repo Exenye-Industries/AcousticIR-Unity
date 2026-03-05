@@ -138,17 +138,21 @@ namespace AcousticIR.Probes
             Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals.");
             LogArrivalStatistics(arrivals);
 
-            // Debug ray visualization
+            // Debug ray visualization - uses Debug.DrawLine (visible in Scene view without selection)
             if (showDebugRays && debugRayCount > 0)
             {
                 lastDebugRays = raytracer.TraceDebug(debugRayCount);
-                Debug.Log($"[AcousticIR] Debug rays: {lastDebugRays.Count} segments from {debugRayCount} rays.");
+                DrawDebugRaysImmediate(lastDebugRays);
+                Debug.Log($"[AcousticIR] Debug rays: {lastDebugRays.Count} segments from {debugRayCount} rays drawn in Scene view (visible for 30s).");
             }
 
             // Generate IR
             float[] irSamples = IRGenerator.Generate(
                 arrivals, sampleRate, irLength,
                 applyWindowing, windowTailPortion, synthesizeLateTail);
+
+            // Diagnose IR content
+            DiagnoseIR(irSamples, sampleRate);
 
             arrivals.Dispose();
 
@@ -199,7 +203,7 @@ namespace AcousticIR.Probes
         {
             if (arrivals.Length == 0)
             {
-                Debug.LogWarning("[AcousticIR] No arrivals - check scene geometry and receiver position.");
+                Debug.LogWarning("[AcousticIR] === NO ARRIVALS === Check scene geometry and receiver position!");
                 return;
             }
 
@@ -219,27 +223,147 @@ namespace AcousticIR.Probes
                     bounceCounts[a.bounceCount]++;
             }
 
+            // Time histogram (10 bins)
+            int histBins = 10;
+            float binWidth = (maxTime - minTime) / histBins;
+            int[] histogram = new int[histBins];
+            if (binWidth > 0f)
+            {
+                for (int i = 0; i < arrivals.Length; i++)
+                {
+                    int bin = Mathf.Clamp((int)((arrivals[i].time - minTime) / binWidth), 0, histBins - 1);
+                    histogram[bin]++;
+                }
+            }
+            else
+            {
+                histogram[0] = arrivals.Length;
+            }
+
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"[AcousticIR] Arrival statistics ({arrivals.Length} arrivals):");
-            sb.AppendLine($"  Time range: {minTime * 1000:F1}ms - {maxTime * 1000:F1}ms");
-            sb.AppendLine($"  Energy range: {minEnergy:F6} - {maxEnergy:F6}");
+            sb.AppendLine("========================================");
+            sb.AppendLine($"[AcousticIR] ARRIVAL STATISTICS ({arrivals.Length} arrivals)");
+            sb.AppendLine("========================================");
+            sb.AppendLine($"  Time range: {minTime * 1000:F1}ms - {maxTime * 1000:F1}ms (spread: {(maxTime - minTime) * 1000:F1}ms)");
+            sb.AppendLine($"  Energy range: {minEnergy:F4} - {maxEnergy:F4} (total per band)");
             sb.Append("  Per bounce:");
             for (int b = 0; b <= maxBounces; b++)
             {
                 if (bounceCounts[b] > 0)
                     sb.Append($" B{b}:{bounceCounts[b]}");
             }
-            Debug.Log(sb.ToString());
+            sb.AppendLine();
+
+            // Time histogram
+            sb.AppendLine("  Time distribution:");
+            for (int h = 0; h < histBins; h++)
+            {
+                float tStart = (minTime + h * binWidth) * 1000f;
+                float tEnd = (minTime + (h + 1) * binWidth) * 1000f;
+                int count = histogram[h];
+                string bar = new string('#', Mathf.Min(count, 50));
+                sb.AppendLine($"    {tStart,7:F1}-{tEnd,7:F1}ms: {count,4} {bar}");
+            }
+
+            // First 10 arrivals
+            sb.AppendLine("  First 10 arrivals:");
+            int showCount = Mathf.Min(arrivals.Length, 10);
+            for (int i = 0; i < showCount; i++)
+            {
+                var a = arrivals[i];
+                sb.AppendLine($"    [{i}] time={a.time * 1000:F2}ms bounce={a.bounceCount} energy={a.bandEnergy.TotalEnergy:F4}");
+            }
+            sb.AppendLine("========================================");
+
+            Debug.LogWarning(sb.ToString());
+        }
+
+        /// <summary>
+        /// Analyzes the generated IR buffer to check for energy distribution issues.
+        /// </summary>
+        void DiagnoseIR(float[] ir, int sr)
+        {
+            float peak = 0f;
+            int peakSample = 0;
+            float totalEnergy = 0f;
+            int nonZeroSamples = 0;
+            int lastNonZeroSample = 0;
+
+            for (int i = 0; i < ir.Length; i++)
+            {
+                float abs = Mathf.Abs(ir[i]);
+                totalEnergy += abs * abs;
+                if (abs > peak) { peak = abs; peakSample = i; }
+                if (abs > 1e-6f) { nonZeroSamples++; lastNonZeroSample = i; }
+            }
+
+            // Energy in first 10ms vs rest
+            int first10ms = Mathf.Min(sr / 100, ir.Length); // 10ms worth of samples
+            float earlyEnergy = 0f;
+            for (int i = 0; i < first10ms; i++)
+                earlyEnergy += ir[i] * ir[i];
+            float lateEnergy = totalEnergy - earlyEnergy;
+
+            float earlyPct = totalEnergy > 0f ? (earlyEnergy / totalEnergy * 100f) : 0f;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[AcousticIR] IR DIAGNOSIS:");
+            sb.AppendLine($"  Peak: {peak:F6} at sample {peakSample} ({(float)peakSample / sr * 1000:F1}ms)");
+            sb.AppendLine($"  Non-zero samples: {nonZeroSamples} / {ir.Length} ({100f * nonZeroSamples / ir.Length:F1}%)");
+            sb.AppendLine($"  Last non-zero: sample {lastNonZeroSample} ({(float)lastNonZeroSample / sr * 1000:F1}ms)");
+            sb.AppendLine($"  Energy: first 10ms={earlyPct:F1}%, rest={100f - earlyPct:F1}%");
+
+            if (earlyPct > 90f)
+                Debug.LogError($"[AcousticIR] PROBLEM: {earlyPct:F0}% of IR energy is in the first 10ms! IR will sound like a click.");
+            else
+                Debug.Log(sb.ToString());
+        }
+
+        /// <summary>
+        /// Draws debug rays immediately using Debug.DrawLine.
+        /// These are visible in Scene view for 30 seconds without needing to select anything.
+        /// Green = high energy, Red = low energy, Cyan = hit receiver.
+        /// </summary>
+        static void DrawDebugRaysImmediate(List<DebugRaySegment> segments)
+        {
+            if (segments == null || segments.Count == 0) return;
+
+            float maxEnergy = 0f;
+            foreach (var seg in segments)
+                if (seg.energy > maxEnergy) maxEnergy = seg.energy;
+            if (maxEnergy < 1e-8f) maxEnergy = 1f;
+
+            int receiverHits = 0;
+            foreach (var seg in segments)
+            {
+                float t = seg.energy / maxEnergy;
+                Color color;
+
+                if (seg.hitReceiver)
+                {
+                    color = Color.cyan;
+                    receiverHits++;
+                }
+                else
+                {
+                    // Green (high energy) -> Red (low energy)
+                    color = Color.Lerp(Color.red, Color.green, t);
+                }
+
+                Debug.DrawLine(seg.start, seg.end, color, 30f);
+            }
+
+            Debug.Log($"[AcousticIR] Drew {segments.Count} ray segments ({receiverHits} hit receiver). Look at Scene view!");
         }
 
         void OnDrawGizmosSelected()
         {
-            // Source (green)
+            // Source (green sphere)
             Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.5f);
             Gizmos.DrawSphere(SourcePosition, 0.15f);
             Gizmos.DrawWireSphere(SourcePosition, 0.15f);
 
-            // Receiver (blue)
+            // Receiver (blue sphere)
             Gizmos.color = new Color(0.2f, 0.4f, 0.9f, 0.5f);
             Gizmos.DrawWireSphere(ReceiverPosition, receiverRadius);
             Gizmos.DrawSphere(ReceiverPosition, 0.1f);
@@ -247,39 +371,6 @@ namespace AcousticIR.Probes
             // Connection line
             Gizmos.color = new Color(1f, 1f, 0.2f, 0.4f);
             Gizmos.DrawLine(SourcePosition, ReceiverPosition);
-
-            // Debug rays
-            if (showDebugRays && lastDebugRays != null && lastDebugRays.Count > 0)
-                DrawDebugRays();
-        }
-
-        void DrawDebugRays()
-        {
-            float maxEnergy = 0f;
-            foreach (var seg in lastDebugRays)
-                if (seg.energy > maxEnergy) maxEnergy = seg.energy;
-            if (maxEnergy < 1e-8f) maxEnergy = 1f;
-
-            foreach (var seg in lastDebugRays)
-            {
-                float t = seg.energy / maxEnergy;
-
-                if (seg.hitReceiver)
-                {
-                    // Receiver hit: bright cyan
-                    Gizmos.color = new Color(0f, 1f, 1f, 0.9f);
-                }
-                else
-                {
-                    // Energy gradient: green (high) -> yellow -> red (low)
-                    float r = 1f - t;
-                    float g = t;
-                    float alpha = 0.15f + t * 0.6f;
-                    Gizmos.color = new Color(r, g, 0f, alpha);
-                }
-
-                Gizmos.DrawLine(seg.start, seg.end);
-            }
         }
     }
 }
