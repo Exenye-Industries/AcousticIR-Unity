@@ -6,23 +6,133 @@ namespace AcousticIR.Core
 {
     /// <summary>
     /// Converts ray arrivals from the acoustic raytracer into a time-domain
-    /// impulse response buffer. Handles sub-sample interpolation, normalization,
-    /// optional late tail synthesis, and windowing.
+    /// impulse response buffer. Uses multi-band synthesis for physically accurate
+    /// spectral content: each arrival is decomposed into 6 octave bands, filtered,
+    /// and summed to preserve the frequency-dependent absorption characteristics.
+    ///
+    /// Without multi-band synthesis, every reflection becomes a broadband click
+    /// regardless of material absorption — losing all spectral information and
+    /// making the IR sound like white noise.
     /// </summary>
     public static class IRGenerator
     {
+        // ====================================================================
+        // MULTI-BAND FILTER INFRASTRUCTURE
+        // 6 octave bands covering DC to Nyquist:
+        //   Band 0: LP at 177 Hz   (captures DC–177 Hz, represents 125 Hz band)
+        //   Band 1: BP at 250 Hz   (177–354 Hz)
+        //   Band 2: BP at 500 Hz   (354–707 Hz)
+        //   Band 3: BP at 1000 Hz  (707–1414 Hz)
+        //   Band 4: BP at 2000 Hz  (1414–2828 Hz)
+        //   Band 5: HP at 2828 Hz  (captures 2828 Hz–Nyquist, represents 4 kHz band)
+        // ====================================================================
+
+        const int NumBands = 6;
+
+        struct BiquadCoeffs
+        {
+            public float b0, b1, b2, a1, a2;
+        }
+
+        /// <summary>2nd-order Butterworth lowpass.</summary>
+        static BiquadCoeffs DesignLowpass(float cutoffHz, int sampleRate)
+        {
+            float w0 = 2f * math.PI * cutoffHz / sampleRate;
+            float cosW0 = math.cos(w0);
+            float alpha = math.sin(w0) / (2f * 0.7071f); // Q=0.7071 for Butterworth
+            float a0 = 1f + alpha;
+            return new BiquadCoeffs
+            {
+                b0 = (1f - cosW0) * 0.5f / a0,
+                b1 = (1f - cosW0) / a0,
+                b2 = (1f - cosW0) * 0.5f / a0,
+                a1 = -2f * cosW0 / a0,
+                a2 = (1f - alpha) / a0
+            };
+        }
+
+        /// <summary>2nd-order Butterworth highpass.</summary>
+        static BiquadCoeffs DesignHighpass(float cutoffHz, int sampleRate)
+        {
+            float w0 = 2f * math.PI * cutoffHz / sampleRate;
+            float cosW0 = math.cos(w0);
+            float alpha = math.sin(w0) / (2f * 0.7071f);
+            float a0 = 1f + alpha;
+            return new BiquadCoeffs
+            {
+                b0 = (1f + cosW0) * 0.5f / a0,
+                b1 = -(1f + cosW0) / a0,
+                b2 = (1f + cosW0) * 0.5f / a0,
+                a1 = -2f * cosW0 / a0,
+                a2 = (1f - alpha) / a0
+            };
+        }
+
+        /// <summary>2nd-order bandpass (constant peak gain = 1).</summary>
+        static BiquadCoeffs DesignBandpass(float centerHz, float q, int sampleRate)
+        {
+            float w0 = 2f * math.PI * centerHz / sampleRate;
+            float alpha = math.sin(w0) / (2f * q);
+            float a0 = 1f + alpha;
+            return new BiquadCoeffs
+            {
+                b0 = alpha / a0,
+                b1 = 0f,
+                b2 = -alpha / a0,
+                a1 = -2f * math.cos(w0) / a0,
+                a2 = (1f - alpha) / a0
+            };
+        }
+
+        /// <summary>Applies a biquad filter to a buffer (in-place, causal).</summary>
+        static void ApplyBiquad(float[] buffer, BiquadCoeffs c, int startSample = 0)
+        {
+            float x1 = 0f, x2 = 0f, y1 = 0f, y2 = 0f;
+            for (int i = startSample; i < buffer.Length; i++)
+            {
+                float x = buffer[i];
+                float y = c.b0 * x + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+                x2 = x1; x1 = x;
+                y2 = y1; y1 = y;
+                buffer[i] = y;
+            }
+        }
+
+        /// <summary>Returns the appropriate filter for the given band index.</summary>
+        static BiquadCoeffs GetBandFilter(int bandIndex, int sampleRate)
+        {
+            if (bandIndex == 0)
+                return DesignLowpass(177f, sampleRate);    // DC to 177 Hz
+            if (bandIndex == NumBands - 1)
+                return DesignHighpass(2828f, sampleRate);   // 2828 Hz to Nyquist
+            float[] centers = { 125f, 250f, 500f, 1000f, 2000f, 4000f };
+            return DesignBandpass(centers[bandIndex], 1.414f, sampleRate); // octave BW
+        }
+
+        /// <summary>Extracts a single band value from AbsorptionCoefficients.</summary>
+        static float GetBandValue(AbsorptionCoefficients coeff, int bandIndex)
+        {
+            switch (bandIndex)
+            {
+                case 0: return coeff.band125Hz;
+                case 1: return coeff.band250Hz;
+                case 2: return coeff.band500Hz;
+                case 3: return coeff.band1kHz;
+                case 4: return coeff.band2kHz;
+                case 5: return coeff.band4kHz;
+                default: return 0f;
+            }
+        }
+
+        // ====================================================================
+        // MONO IR GENERATION
+        // ====================================================================
+
         /// <summary>
         /// Generates a mono impulse response from ray arrivals.
+        /// Uses multi-band synthesis: each reflection is spectrally shaped
+        /// according to its 6-band energy values from material absorption.
         /// </summary>
-        /// <param name="arrivals">Ray arrivals from AcousticRaytracer.Trace().</param>
-        /// <param name="sampleRate">Output sample rate (e.g. 48000).</param>
-        /// <param name="irLengthSeconds">Maximum IR length in seconds.</param>
-        /// <param name="applyWindowing">Whether to apply a Hann window to the tail.</param>
-        /// <param name="windowTailPortion">Portion of the IR tail to window (0-1).</param>
-        /// <param name="synthesizeLateTail">Whether to add stochastic late reverb tail.</param>
-        /// <param name="speedOfSound">Speed of sound in m/s (for distance calculation).</param>
-        /// <param name="rayCount">Number of rays used (for Monte Carlo normalization).</param>
-        /// <returns>Float array of IR samples, normalized to peak at -1dB.</returns>
         public static float[] Generate(
             NativeList<RayArrival> arrivals,
             int sampleRate = 48000,
@@ -39,12 +149,10 @@ namespace AcousticIR.Core
             if (arrivals.Length == 0)
                 return ir;
 
-            // Phase 1: Accumulate ray arrivals into the IR buffer
-            // Separates direct sound (B0) from reflections (B1+) to avoid
-            // coherent pileup of thousands of B0 arrivals at the same sample.
+            // Phase 1: Multi-band accumulation of ray arrivals
             AccumulateArrivals(ir, arrivals, sampleRate, speedOfSound, rayCount);
 
-            // Phase 2: Synthesize late reverb tail (stochastic noise with decay)
+            // Phase 2: Per-band late reverb tail (fills gaps where arrivals are sparse)
             if (synthesizeLateTail)
                 SynthesizeLateTail(ir, arrivals, sampleRate, speedOfSound);
 
@@ -59,108 +167,109 @@ namespace AcousticIR.Core
         }
 
         /// <summary>
-        /// Accumulates ray arrivals into the IR buffer.
+        /// Multi-band arrival accumulation.
         ///
-        /// Key design decisions:
-        /// - Bounce-0 arrivals (direct sound) are CONSOLIDATED into a single impulse.
-        ///   Many rays hit the receiver before bouncing (all at the same time), which would
-        ///   create a massive spike drowning out reflections. Direct sound is one physical event.
-        /// - Bounce 1+ arrivals (reflections) are placed individually with sinc interpolation.
-        ///   Each represents a unique reflection path through the scene.
-        /// - All arrivals are attenuated by 1/totalDistance (inverse distance law for amplitude).
-        ///   This is applied HERE (not per-segment in the raytracer) to avoid double-counting
-        ///   while the receiver sphere geometry handles the angular component of 1/r².
+        /// Each arrival is placed into 6 separate frequency band buffers using
+        /// its per-band energy values. After accumulation, each band buffer is
+        /// filtered with its corresponding octave-band filter (LP/BP/HP).
+        /// The sum of all filtered bands produces a spectrally accurate IR where
+        /// each reflection has the correct frequency content.
+        ///
+        /// A reflection off concrete (high HF absorption) produces a dark impulse.
+        /// A reflection off glass (low absorption) produces a bright impulse.
+        /// This is the key difference from the previous broadband approach where
+        /// every reflection was an identical white click.
         /// </summary>
         static void AccumulateArrivals(float[] ir, NativeList<RayArrival> arrivals,
             int sampleRate, float speedOfSound, int rayCount)
         {
             const int sincHalfWidth = 4;
 
-            // === Pass 1: Collect direct sound (bounce 0) statistics ===
+            // Allocate per-band buffers
+            float[][] bandBuffers = new float[NumBands][];
+            for (int b = 0; b < NumBands; b++)
+                bandBuffers[b] = new float[ir.Length];
+
+            // === Pass 1: Collect direct sound (bounce 0) per band ===
             float directTimeSum = 0f;
-            float directEnergySum = 0f;
             int directCount = 0;
+            float[] directBandSum = new float[NumBands];
 
             for (int i = 0; i < arrivals.Length; i++)
             {
                 if (arrivals[i].bounceCount == 0)
                 {
                     directTimeSum += arrivals[i].time;
-                    directEnergySum += BandEnergyToAmplitude(arrivals[i].bandEnergy);
+                    for (int b = 0; b < NumBands; b++)
+                        directBandSum[b] += GetBandValue(arrivals[i].bandEnergy, b);
                     directCount++;
                 }
             }
 
-            // === Place direct sound as a single consolidated impulse ===
+            // Place direct sound as a single consolidated impulse per band
             if (directCount > 0)
             {
                 float directTime = directTimeSum / directCount;
                 float directDistance = directTime * speedOfSound;
-
-                // Average amplitude of B0 arrivals, attenuated by 1/distance
-                float directAmplitude = (directEnergySum / directCount)
-                    / Mathf.Max(directDistance, 0.1f);
-
+                float distAtten = 1f / Mathf.Max(directDistance, 0.1f);
                 float samplePos = directTime * sampleRate;
-                int centerSample = (int)samplePos;
-                float fraction = samplePos - centerSample;
 
-                for (int k = -sincHalfWidth; k <= sincHalfWidth; k++)
+                for (int b = 0; b < NumBands; b++)
                 {
-                    int sampleIdx = centerSample + k;
-                    if (sampleIdx < 0 || sampleIdx >= ir.Length) continue;
-                    float sincValue = AcousticMath.Sinc(k - fraction);
-                    ir[sampleIdx] += directAmplitude * sincValue;
+                    float bandAmp = (directBandSum[b] / directCount) * distAtten;
+                    PlaceSincImpulse(bandBuffers[b], samplePos, bandAmp, sincHalfWidth);
                 }
 
+                // Log using broadband amplitude for readability
+                float totalAmp = BandEnergyToAmplitude(arrivals[0].bandEnergy) * distAtten;
                 Debug.Log($"[AcousticIR] Direct sound: {directCount} B0 arrivals → 1 impulse at " +
-                          $"{directTime * 1000:F1}ms, amplitude={directAmplitude:F4}, distance={directDistance:F1}m");
+                          $"{directTime * 1000:F1}ms, distance={directDistance:F1}m");
             }
 
-            // === Pass 2: Accumulate reflections (bounce >= 1) individually ===
+            // === Pass 2: Place reflections (bounce >= 1) per band ===
             int reflectionCount = 0;
-            float reflectionEnergySum = 0f;
 
             for (int i = 0; i < arrivals.Length; i++)
             {
                 RayArrival arrival = arrivals[i];
-                if (arrival.bounceCount == 0) continue; // Already handled above
+                if (arrival.bounceCount == 0) continue;
 
                 float samplePos = arrival.time * sampleRate;
-                int centerSample = (int)samplePos;
-                float fraction = samplePos - centerSample;
-
-                // Amplitude: A-weighted band energy, attenuated by 1/totalDistance
                 float totalDistance = arrival.time * speedOfSound;
-                float distanceAtten = 1f / Mathf.Max(totalDistance, 0.1f);
-                float amplitude = BandEnergyToAmplitude(arrival.bandEnergy) * distanceAtten;
+                float distAtten = 1f / Mathf.Max(totalDistance, 0.1f);
 
-                reflectionEnergySum += amplitude * amplitude;
-                reflectionCount++;
-
-                // Sinc interpolation for sub-sample accuracy
-                for (int k = -sincHalfWidth; k <= sincHalfWidth; k++)
+                // Place in each band buffer with band-specific amplitude
+                for (int b = 0; b < NumBands; b++)
                 {
-                    int sampleIdx = centerSample + k;
-                    if (sampleIdx < 0 || sampleIdx >= ir.Length) continue;
-                    float sincValue = AcousticMath.Sinc(k - fraction);
-                    ir[sampleIdx] += amplitude * sincValue;
+                    float bandAmp = GetBandValue(arrival.bandEnergy, b) * distAtten;
+                    PlaceSincImpulse(bandBuffers[b], samplePos, bandAmp, sincHalfWidth);
                 }
+
+                reflectionCount++;
             }
 
-            Debug.Log($"[AcousticIR] Reflections: {reflectionCount} arrivals placed, " +
-                      $"total RMS energy={Mathf.Sqrt(reflectionEnergySum):F4}");
+            // === Apply octave-band filters ===
+            for (int b = 0; b < NumBands; b++)
+            {
+                BiquadCoeffs coeffs = GetBandFilter(b, sampleRate);
+                ApplyBiquad(bandBuffers[b], coeffs);
+            }
+
+            // === Sum all bands into output ===
+            for (int b = 0; b < NumBands; b++)
+                for (int s = 0; s < ir.Length; s++)
+                    ir[s] += bandBuffers[b][s];
+
+            Debug.Log($"[AcousticIR] Multi-band synthesis: {reflectionCount} reflections × {NumBands} bands");
         }
 
         /// <summary>
         /// Converts 6-band energy to a single amplitude value.
         /// Uses simplified A-weighting for perceptual accuracy.
+        /// Used for logging and diagnostics; the actual IR uses per-band values.
         /// </summary>
         static float BandEnergyToAmplitude(AbsorptionCoefficients bandEnergy)
         {
-            // A-weighting relative levels at each octave band (approximate dB)
-            // 125Hz: -16.1, 250Hz: -8.6, 500Hz: -3.2, 1kHz: 0, 2kHz: +1.2, 4kHz: +1.0
-            // Converted to linear weights (normalized so 1kHz = 1.0)
             const float w125 = 0.157f;
             const float w250 = 0.372f;
             const float w500 = 0.692f;
@@ -181,32 +290,38 @@ namespace AcousticIR.Core
         }
 
         /// <summary>
-        /// Synthesizes a dense late reverberation tail using energy-matched Gaussian noise.
+        /// Per-band late reverb tail synthesis.
         ///
-        /// The approach:
-        /// 1. Build an energy histogram from the ray arrivals (energy per time bin)
-        /// 2. Fit an exponential decay to the histogram (estimates RT60)
-        /// 3. Generate dense Gaussian noise at EVERY sample from the mixing time onward
-        /// 4. Scale noise amplitude to match the measured energy decay curve
-        /// 5. Crossfade between discrete arrivals and noise around the mixing time
+        /// Each of the 6 frequency bands gets its own noise tail with:
+        /// - Band-specific RT60 estimated from the arrival energy histogram
+        /// - White noise generated → bandpass filtered to the correct frequency range
+        /// - Independent decay rate (HF bands decay faster = natural HF rolloff)
         ///
-        /// This replaces the old sparse Poisson approach which produced
-        /// audible individual spikes instead of smooth reverb texture.
+        /// This replaces the old single-band white noise approach that produced
+        /// harsh high-frequency hissing. The per-band approach naturally creates
+        /// a warm, realistic reverb tail because:
+        /// - Materials absorb more HF → HF bands have shorter RT60
+        /// - Each band is correctly filtered → no broadband noise artifacts
+        /// - The sum of 6 narrowband noises = properly colored reverb tail
         /// </summary>
         static void SynthesizeLateTail(float[] ir, NativeList<RayArrival> arrivals,
             int sampleRate, float speedOfSound)
         {
-            // === Step 1: Build energy histogram from arrivals ===
-            const int binMs = 5; // 5ms time bins
+            const int binMs = 5;
             int binSamples = binMs * sampleRate / 1000;
             int numBins = ir.Length / binSamples + 1;
-            float[] binEnergy = new float[numBins];
+
+            // === Build per-band energy histograms ===
+            float[][] bandBinEnergy = new float[NumBands][];
+            for (int b = 0; b < NumBands; b++)
+                bandBinEnergy[b] = new float[numBins];
+
             float maxArrivalTime = 0f;
             int reflectionCount = 0;
 
             for (int i = 0; i < arrivals.Length; i++)
             {
-                if (arrivals[i].bounceCount == 0) continue; // Skip direct sound
+                if (arrivals[i].bounceCount == 0) continue;
 
                 if (arrivals[i].time > maxArrivalTime)
                     maxArrivalTime = arrivals[i].time;
@@ -214,130 +329,146 @@ namespace AcousticIR.Core
                 int bin = (int)(arrivals[i].time * 1000f / binMs);
                 if (bin < 0 || bin >= numBins) continue;
 
-                // Same amplitude calculation as AccumulateArrivals
                 float totalDist = arrivals[i].time * speedOfSound;
                 float distAtten = 1f / Mathf.Max(totalDist, 0.1f);
-                float amp = BandEnergyToAmplitude(arrivals[i].bandEnergy) * distAtten;
-                binEnergy[bin] += amp * amp; // accumulate energy (amplitude²)
+
+                for (int b = 0; b < NumBands; b++)
+                {
+                    float bandAmp = GetBandValue(arrivals[i].bandEnergy, b) * distAtten;
+                    bandBinEnergy[b][bin] += bandAmp * bandAmp;
+                }
                 reflectionCount++;
             }
 
             if (reflectionCount == 0 || maxArrivalTime < 0.02f)
                 return;
 
-            // Convert to energy density per sample
-            for (int b = 0; b < numBins; b++)
-                binEnergy[b] /= binSamples;
+            // Normalize by bin size → energy density per sample
+            for (int b = 0; b < NumBands; b++)
+                for (int bin = 0; bin < numBins; bin++)
+                    bandBinEnergy[b][bin] /= binSamples;
 
-            // === Step 2: Find peak energy and estimate RT60 ===
-            // Skip first 2 bins (10ms) to avoid direct sound contamination
-            float peakEnergyDensity = 0f;
-            int peakBin = 2;
-            for (int b = 2; b < numBins; b++)
+            // === Estimate mixing time from broadband peak ===
+            // Combine all bands to find a sensible mixing point
+            float broadbandPeakEnergy = 0f;
+            int broadbandPeakBin = 2;
+            for (int bin = 2; bin < numBins; bin++)
             {
-                if (binEnergy[b] > peakEnergyDensity)
+                float total = 0f;
+                for (int b = 0; b < NumBands; b++)
+                    total += bandBinEnergy[b][bin];
+                if (total > broadbandPeakEnergy)
                 {
-                    peakEnergyDensity = binEnergy[b];
-                    peakBin = b;
+                    broadbandPeakEnergy = total;
+                    broadbandPeakBin = bin;
                 }
             }
 
-            if (peakEnergyDensity < 1e-14f)
+            if (broadbandPeakEnergy < 1e-14f)
                 return;
 
-            // Find last bin above -60dB from peak
-            float threshold60dB = peakEnergyDensity * 0.001f;
-            int lastActiveBin = peakBin;
-            for (int b = peakBin; b < numBins; b++)
-            {
-                if (binEnergy[b] > threshold60dB)
-                    lastActiveBin = b;
-            }
-
-            // Estimate RT60 (extend beyond last active bin)
-            float peakTimeS = peakBin * binMs / 1000f;
-            float lastTimeS = lastActiveBin * binMs / 1000f;
-            float estimatedRT60 = (lastTimeS - peakTimeS) * 1.5f;
-            estimatedRT60 = math.clamp(estimatedRT60, 0.3f, (float)ir.Length / sampleRate);
-
-            // Decay rate for energy: E(t) = E0 * exp(-13.816/RT60 * t)
-            // (60dB = factor of 10^6 in energy = exp(13.816))
-            float energyDecayRate = -13.816f / estimatedRT60;
-
-            // Reference amplitude at the peak time
-            float peakAmplitude = math.sqrt(peakEnergyDensity);
-
-            // === Step 3: Generate dense Gaussian noise filling every sample ===
-            // Mixing time: where discrete early reflections transition to diffuse reverb
-            // Typically 50-80ms for rooms, can be longer for large spaces
-            float mixingTimeMs = math.max(30f, peakBin * binMs * 0.8f);
+            float mixingTimeMs = math.max(40f, broadbandPeakBin * binMs * 0.8f);
             int mixingStartSample = (int)(mixingTimeMs / 1000f * sampleRate);
-            int mixingEndSample = (int)((mixingTimeMs + 20f) / 1000f * sampleRate); // 20ms crossfade
+            int mixingEndSample = (int)((mixingTimeMs + 50f) / 1000f * sampleRate); // 50ms crossfade
 
-            var rng = new Unity.Mathematics.Random(12345); // fixed seed for reproducibility
+            // === Generate per-band noise tails ===
+            float overallRT60 = 0f;
+            int activeBands = 0;
 
-            int tailSamplesGenerated = 0;
-            for (int s = mixingStartSample; s < ir.Length; s++)
+            for (int b = 0; b < NumBands; b++)
             {
-                float time = (float)s / sampleRate;
-                float timeSincePeak = time - peakTimeS;
-                if (timeSincePeak < 0f) timeSincePeak = 0f;
-
-                // Exponential decay envelope for amplitude
-                // (energy decays at energyDecayRate, amplitude at half that rate)
-                float envelope = peakAmplitude * math.exp(energyDecayRate * 0.5f * timeSincePeak);
-
-                if (envelope < 1e-9f)
-                    break;
-
-                // Crossfade: ramp noise from 0 to 1 over the mixing zone
-                float crossfade = 1f;
-                if (s < mixingEndSample)
+                // Find peak energy density for this band
+                float peakEnergy = 0f;
+                int peakBin = 2;
+                for (int bin = 2; bin < numBins; bin++)
                 {
-                    crossfade = (float)(s - mixingStartSample) / (float)(mixingEndSample - mixingStartSample);
-                    crossfade = math.clamp(crossfade, 0f, 1f);
-                    crossfade = crossfade * crossfade; // smooth ease-in
+                    if (bandBinEnergy[b][bin] > peakEnergy)
+                    {
+                        peakEnergy = bandBinEnergy[b][bin];
+                        peakBin = bin;
+                    }
                 }
 
-                // Gaussian noise via Box-Muller transform
-                float u1 = math.max(rng.NextFloat(), 1e-10f);
-                float u2 = rng.NextFloat();
-                float gaussian = math.sqrt(-2f * math.log(u1)) * math.cos(2f * math.PI * u2);
+                if (peakEnergy < 1e-14f) continue;
 
-                // Add noise scaled by envelope and crossfade
-                ir[s] += gaussian * envelope * crossfade;
-                tailSamplesGenerated++;
+                // Find last bin above -60dB threshold for this band
+                float thresh60dB = peakEnergy * 0.001f;
+                int lastActiveBin = peakBin;
+                for (int bin = peakBin; bin < numBins; bin++)
+                    if (bandBinEnergy[b][bin] > thresh60dB)
+                        lastActiveBin = bin;
+
+                // Estimate RT60 for this band (generous multiplier)
+                float peakTimeS = peakBin * binMs / 1000f;
+                float lastTimeS = lastActiveBin * binMs / 1000f;
+                float bandRT60 = (lastTimeS - peakTimeS) * 2.5f;
+                bandRT60 = math.clamp(bandRT60, 0.2f, (float)ir.Length / sampleRate);
+
+                overallRT60 = math.max(overallRT60, bandRT60);
+                activeBands++;
+
+                float decayRate = -13.816f / bandRT60;
+                float peakAmp = math.sqrt(peakEnergy);
+
+                // Generate noise for this band
+                float[] bandNoise = new float[ir.Length];
+                var rng = new Unity.Mathematics.Random((uint)(12345 + b * 7919));
+
+                int tailSamples = 0;
+                for (int s = mixingStartSample; s < ir.Length; s++)
+                {
+                    float time = (float)s / sampleRate;
+                    float timeSincePeak = time - peakTimeS;
+                    if (timeSincePeak < 0f) timeSincePeak = 0f;
+
+                    // Amplitude envelope (energy decays at decayRate, amplitude at half)
+                    float envelope = peakAmp * math.exp(decayRate * 0.5f * timeSincePeak);
+
+                    if (envelope < 1e-15f) break; // Very low threshold for long tails
+
+                    // Crossfade from discrete arrivals to noise
+                    float crossfade = 1f;
+                    if (s < mixingEndSample)
+                    {
+                        crossfade = (float)(s - mixingStartSample)
+                            / (float)(mixingEndSample - mixingStartSample);
+                        crossfade = math.clamp(crossfade, 0f, 1f);
+                        crossfade = crossfade * crossfade; // smooth ease-in
+                    }
+
+                    // Box-Muller Gaussian noise
+                    float u1 = math.max(rng.NextFloat(), 1e-10f);
+                    float u2 = rng.NextFloat();
+                    float gaussian = math.sqrt(-2f * math.log(u1))
+                        * math.cos(2f * math.PI * u2);
+
+                    bandNoise[s] = gaussian * envelope * crossfade;
+                    tailSamples++;
+                }
+
+                // Apply band filter to noise
+                BiquadCoeffs coeffs = GetBandFilter(b, sampleRate);
+                ApplyBiquad(bandNoise, coeffs, mixingStartSample);
+
+                // Add filtered noise to IR
+                for (int s = mixingStartSample; s < ir.Length; s++)
+                    ir[s] += bandNoise[s];
             }
 
-            Debug.Log($"[AcousticIR] Late tail: RT60≈{estimatedRT60:F2}s, " +
-                      $"peakAmplitude={peakAmplitude:E3}, mixing@{mixingTimeMs:F0}ms, " +
-                      $"{tailSamplesGenerated} samples filled, " +
+            Debug.Log($"[AcousticIR] Per-band tail synthesis: {activeBands} bands active, " +
+                      $"max RT60≈{overallRT60:F2}s, mixing@{mixingTimeMs:F0}ms, " +
                       $"from {reflectionCount} reflections (last at {maxArrivalTime * 1000:F0}ms)");
         }
 
         // ====================================================================
         // STEREO IR GENERATION
-        // Uses arrival directions + virtual microphone patterns to create
-        // a naturally spatialized stereo impulse response.
         // ====================================================================
 
         /// <summary>
         /// Generates a stereo impulse response from ray arrivals.
-        /// Uses arrival directions combined with virtual microphone patterns
-        /// to create a naturally spatialized stereo image.
+        /// Uses multi-band synthesis + virtual microphone patterns for
+        /// spectrally accurate stereo imaging.
         /// </summary>
-        /// <param name="arrivals">Ray arrivals from AcousticRaytracer.Trace().</param>
-        /// <param name="receiverForward">Forward direction of the virtual microphone.</param>
-        /// <param name="receiverUp">Up direction of the virtual microphone.</param>
-        /// <param name="stereoConfig">Stereo microphone configuration.</param>
-        /// <param name="sampleRate">Output sample rate.</param>
-        /// <param name="irLengthSeconds">Maximum IR length in seconds.</param>
-        /// <param name="applyWindowing">Whether to apply Hann window to tail.</param>
-        /// <param name="windowTailPortion">Portion of tail to window.</param>
-        /// <param name="synthesizeLateTail">Whether to add stochastic late reverb.</param>
-        /// <param name="speedOfSound">Speed of sound in m/s.</param>
-        /// <param name="rayCount">Number of rays used.</param>
-        /// <returns>Tuple of (left, right) IR sample arrays.</returns>
         public static (float[] left, float[] right) GenerateStereo(
             NativeList<RayArrival> arrivals,
             float3 receiverForward,
@@ -364,11 +495,11 @@ namespace AcousticIR.Core
             float3 receiverRight = math.normalize(math.cross(receiverForward, receiverUp));
             receiverUp = math.cross(receiverRight, receiverForward);
 
-            // Phase 1: Accumulate arrivals with stereo microphone patterns
+            // Phase 1: Multi-band stereo accumulation
             AccumulateStereoArrivals(irL, irR, arrivals, sampleRate, speedOfSound,
                 rayCount, receiverForward, receiverRight, stereoConfig);
 
-            // Phase 2: Synthesize late reverb tail (decorrelated stereo noise)
+            // Phase 2: Per-band stereo late reverb tail
             if (synthesizeLateTail)
                 SynthesizeLateTailStereo(irL, irR, arrivals, sampleRate, speedOfSound);
 
@@ -389,8 +520,10 @@ namespace AcousticIR.Core
         }
 
         /// <summary>
-        /// Accumulates ray arrivals into stereo IR buffers using microphone patterns.
-        /// Each arrival's direction relative to the receiver determines L/R gain.
+        /// Multi-band stereo arrival accumulation.
+        /// Each arrival is placed into 6 band buffers per channel (12 total),
+        /// with stereo gains from the microphone pattern applied per arrival.
+        /// After accumulation, each band is filtered and summed per channel.
         /// </summary>
         static void AccumulateStereoArrivals(float[] irL, float[] irR,
             NativeList<RayArrival> arrivals, int sampleRate, float speedOfSound,
@@ -399,19 +532,30 @@ namespace AcousticIR.Core
         {
             const int sincHalfWidth = 4;
 
-            // === Pass 1: Direct sound (bounce 0) - consolidated, same as mono ===
+            // Allocate per-band buffers for both channels
+            float[][] bandL = new float[NumBands][];
+            float[][] bandR = new float[NumBands][];
+            for (int b = 0; b < NumBands; b++)
+            {
+                bandL[b] = new float[irL.Length];
+                bandR[b] = new float[irR.Length];
+            }
+
+            // === Pass 1: Direct sound (bounce 0) - consolidated per band ===
             float directTimeSum = 0f;
-            float directEnergySum = 0f;
             float3 directDirSum = float3.zero;
             int directCount = 0;
+            float[] directBandSumL = new float[NumBands];
+            float[] directBandSumR = new float[NumBands];
 
             for (int i = 0; i < arrivals.Length; i++)
             {
                 if (arrivals[i].bounceCount == 0)
                 {
                     directTimeSum += arrivals[i].time;
-                    directEnergySum += BandEnergyToAmplitude(arrivals[i].bandEnergy);
                     directDirSum += arrivals[i].direction;
+                    for (int b = 0; b < NumBands; b++)
+                        directBandSumL[b] += GetBandValue(arrivals[i].bandEnergy, b);
                     directCount++;
                 }
             }
@@ -420,26 +564,27 @@ namespace AcousticIR.Core
             {
                 float directTime = directTimeSum / directCount;
                 float directDistance = directTime * speedOfSound;
-                float directAmplitude = (directEnergySum / directCount)
-                    / Mathf.Max(directDistance, 0.1f);
+                float distAtten = 1f / Mathf.Max(directDistance, 0.1f);
                 float3 directDir = math.normalizesafe(directDirSum / directCount);
 
-                // Compute stereo gains for direct sound
+                // Compute stereo gains for direct sound direction
                 ComputeStereoGains(directDir, receiverForward, receiverRight,
                     config, speedOfSound, sampleRate,
                     out float gainL, out float gainR,
                     out int sampleOffsetL, out int sampleOffsetR);
 
-                // Place in L channel
                 float samplePosL = directTime * sampleRate + sampleOffsetL;
-                PlaceSincImpulse(irL, samplePosL, directAmplitude * gainL, sincHalfWidth);
-
-                // Place in R channel
                 float samplePosR = directTime * sampleRate + sampleOffsetR;
-                PlaceSincImpulse(irR, samplePosR, directAmplitude * gainR, sincHalfWidth);
+
+                for (int b = 0; b < NumBands; b++)
+                {
+                    float bandAmp = (directBandSumL[b] / directCount) * distAtten;
+                    PlaceSincImpulse(bandL[b], samplePosL, bandAmp * gainL, sincHalfWidth);
+                    PlaceSincImpulse(bandR[b], samplePosR, bandAmp * gainR, sincHalfWidth);
+                }
             }
 
-            // === Pass 2: Reflections (bounce >= 1) individually ===
+            // === Pass 2: Reflections (bounce >= 1) per band with stereo ===
             int reflectionCount = 0;
 
             for (int i = 0; i < arrivals.Length; i++)
@@ -448,8 +593,7 @@ namespace AcousticIR.Core
                 if (arrival.bounceCount == 0) continue;
 
                 float totalDistance = arrival.time * speedOfSound;
-                float distanceAtten = 1f / Mathf.Max(totalDistance, 0.1f);
-                float amplitude = BandEnergyToAmplitude(arrival.bandEnergy) * distanceAtten;
+                float distAtten = 1f / Mathf.Max(totalDistance, 0.1f);
 
                 // Compute stereo gains from arrival direction
                 ComputeStereoGains(arrival.direction, receiverForward, receiverRight,
@@ -457,20 +601,206 @@ namespace AcousticIR.Core
                     out float gainL, out float gainR,
                     out int sampleOffsetL, out int sampleOffsetR);
 
-                // Place in L channel
                 float samplePosL = arrival.time * sampleRate + sampleOffsetL;
-                PlaceSincImpulse(irL, samplePosL, amplitude * gainL, sincHalfWidth);
-
-                // Place in R channel
                 float samplePosR = arrival.time * sampleRate + sampleOffsetR;
-                PlaceSincImpulse(irR, samplePosR, amplitude * gainR, sincHalfWidth);
+
+                // Place in each band buffer with band-specific amplitude × stereo gain
+                for (int b = 0; b < NumBands; b++)
+                {
+                    float bandAmp = GetBandValue(arrival.bandEnergy, b) * distAtten;
+                    PlaceSincImpulse(bandL[b], samplePosL, bandAmp * gainL, sincHalfWidth);
+                    PlaceSincImpulse(bandR[b], samplePosR, bandAmp * gainR, sincHalfWidth);
+                }
 
                 reflectionCount++;
             }
 
-            Debug.Log($"[AcousticIR] Stereo reflections: {reflectionCount} arrivals placed " +
-                      $"({config.mode} mode)");
+            // === Apply octave-band filters to each band ===
+            for (int b = 0; b < NumBands; b++)
+            {
+                BiquadCoeffs coeffs = GetBandFilter(b, sampleRate);
+                ApplyBiquad(bandL[b], coeffs);
+                ApplyBiquad(bandR[b], coeffs);
+            }
+
+            // === Sum all bands into output channels ===
+            for (int b = 0; b < NumBands; b++)
+            {
+                for (int s = 0; s < irL.Length; s++)
+                {
+                    irL[s] += bandL[b][s];
+                    irR[s] += bandR[b][s];
+                }
+            }
+
+            Debug.Log($"[AcousticIR] Stereo multi-band: {reflectionCount} reflections × " +
+                      $"{NumBands} bands ({config.mode} mode)");
         }
+
+        /// <summary>
+        /// Per-band decorrelated stereo late reverb tail.
+        /// Each band uses independent L/R noise seeds for natural diffuse reverb.
+        /// Each band decays at its own rate (HF bands faster = natural reverb color).
+        /// </summary>
+        static void SynthesizeLateTailStereo(float[] irL, float[] irR,
+            NativeList<RayArrival> arrivals, int sampleRate, float speedOfSound)
+        {
+            const int binMs = 5;
+            int binSamples = binMs * sampleRate / 1000;
+            int numBins = irL.Length / binSamples + 1;
+
+            // Build per-band energy histograms
+            float[][] bandBinEnergy = new float[NumBands][];
+            for (int b = 0; b < NumBands; b++)
+                bandBinEnergy[b] = new float[numBins];
+
+            float maxArrivalTime = 0f;
+            int reflectionCount = 0;
+
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                if (arrivals[i].bounceCount == 0) continue;
+
+                if (arrivals[i].time > maxArrivalTime)
+                    maxArrivalTime = arrivals[i].time;
+
+                int bin = (int)(arrivals[i].time * 1000f / binMs);
+                if (bin < 0 || bin >= numBins) continue;
+
+                float totalDist = arrivals[i].time * speedOfSound;
+                float distAtten = 1f / Mathf.Max(totalDist, 0.1f);
+
+                for (int b = 0; b < NumBands; b++)
+                {
+                    float bandAmp = GetBandValue(arrivals[i].bandEnergy, b) * distAtten;
+                    bandBinEnergy[b][bin] += bandAmp * bandAmp;
+                }
+                reflectionCount++;
+            }
+
+            if (reflectionCount == 0 || maxArrivalTime < 0.02f)
+                return;
+
+            for (int b = 0; b < NumBands; b++)
+                for (int bin = 0; bin < numBins; bin++)
+                    bandBinEnergy[b][bin] /= binSamples;
+
+            // Mixing time from broadband peak
+            float broadbandPeakEnergy = 0f;
+            int broadbandPeakBin = 2;
+            for (int bin = 2; bin < numBins; bin++)
+            {
+                float total = 0f;
+                for (int b = 0; b < NumBands; b++)
+                    total += bandBinEnergy[b][bin];
+                if (total > broadbandPeakEnergy)
+                {
+                    broadbandPeakEnergy = total;
+                    broadbandPeakBin = bin;
+                }
+            }
+
+            if (broadbandPeakEnergy < 1e-14f)
+                return;
+
+            float mixingTimeMs = math.max(40f, broadbandPeakBin * binMs * 0.8f);
+            int mixingStartSample = (int)(mixingTimeMs / 1000f * sampleRate);
+            int mixingEndSample = (int)((mixingTimeMs + 50f) / 1000f * sampleRate);
+
+            float overallRT60 = 0f;
+            int activeBands = 0;
+
+            for (int b = 0; b < NumBands; b++)
+            {
+                float peakEnergy = 0f;
+                int peakBin = 2;
+                for (int bin = 2; bin < numBins; bin++)
+                {
+                    if (bandBinEnergy[b][bin] > peakEnergy)
+                    {
+                        peakEnergy = bandBinEnergy[b][bin];
+                        peakBin = bin;
+                    }
+                }
+
+                if (peakEnergy < 1e-14f) continue;
+
+                float thresh60dB = peakEnergy * 0.001f;
+                int lastActiveBin = peakBin;
+                for (int bin = peakBin; bin < numBins; bin++)
+                    if (bandBinEnergy[b][bin] > thresh60dB)
+                        lastActiveBin = bin;
+
+                float peakTimeS = peakBin * binMs / 1000f;
+                float lastTimeS = lastActiveBin * binMs / 1000f;
+                float bandRT60 = (lastTimeS - peakTimeS) * 2.5f;
+                bandRT60 = math.clamp(bandRT60, 0.2f, (float)irL.Length / sampleRate);
+
+                overallRT60 = math.max(overallRT60, bandRT60);
+                activeBands++;
+
+                float decayRate = -13.816f / bandRT60;
+                float peakAmp = math.sqrt(peakEnergy);
+
+                // Independent L/R noise per band (different seeds for decorrelation)
+                float[] bandNoiseL = new float[irL.Length];
+                float[] bandNoiseR = new float[irR.Length];
+                var rngL = new Unity.Mathematics.Random((uint)(12345 + b * 7919));
+                var rngR = new Unity.Mathematics.Random((uint)(67890 + b * 6271));
+
+                for (int s = mixingStartSample; s < irL.Length; s++)
+                {
+                    float time = (float)s / sampleRate;
+                    float timeSincePeak = time - peakTimeS;
+                    if (timeSincePeak < 0f) timeSincePeak = 0f;
+
+                    float envelope = peakAmp * math.exp(decayRate * 0.5f * timeSincePeak);
+                    if (envelope < 1e-15f) break;
+
+                    float crossfade = 1f;
+                    if (s < mixingEndSample)
+                    {
+                        crossfade = (float)(s - mixingStartSample)
+                            / (float)(mixingEndSample - mixingStartSample);
+                        crossfade = math.clamp(crossfade, 0f, 1f);
+                        crossfade = crossfade * crossfade;
+                    }
+
+                    // Independent Gaussian noise for L/R
+                    float u1L = math.max(rngL.NextFloat(), 1e-10f);
+                    float u2L = rngL.NextFloat();
+                    float gaussL = math.sqrt(-2f * math.log(u1L))
+                        * math.cos(2f * math.PI * u2L);
+
+                    float u1R = math.max(rngR.NextFloat(), 1e-10f);
+                    float u2R = rngR.NextFloat();
+                    float gaussR = math.sqrt(-2f * math.log(u1R))
+                        * math.cos(2f * math.PI * u2R);
+
+                    bandNoiseL[s] = gaussL * envelope * crossfade;
+                    bandNoiseR[s] = gaussR * envelope * crossfade;
+                }
+
+                // Apply band filter to both channels
+                BiquadCoeffs coeffs = GetBandFilter(b, sampleRate);
+                ApplyBiquad(bandNoiseL, coeffs, mixingStartSample);
+                ApplyBiquad(bandNoiseR, coeffs, mixingStartSample);
+
+                // Add to IR
+                for (int s = mixingStartSample; s < irL.Length; s++)
+                {
+                    irL[s] += bandNoiseL[s];
+                    irR[s] += bandNoiseR[s];
+                }
+            }
+
+            Debug.Log($"[AcousticIR] Stereo per-band tail: {activeBands} bands, " +
+                      $"max RT60≈{overallRT60:F2}s, mixing@{mixingTimeMs:F0}ms");
+        }
+
+        // ====================================================================
+        // SHARED UTILITIES
+        // ====================================================================
 
         /// <summary>
         /// Places a single impulse into a buffer using sinc interpolation.
@@ -493,9 +823,6 @@ namespace AcousticIR.Core
         /// <summary>
         /// Computes left/right gains and sample offsets based on the stereo mode
         /// and the arrival direction relative to the receiver orientation.
-        ///
-        /// For XY/MS: level differences only (sampleOffset = 0).
-        /// For AB: time differences (level = 1, offset varies).
         /// </summary>
         static void ComputeStereoGains(float3 arrivalDirection,
             float3 receiverForward, float3 receiverRight,
@@ -506,8 +833,6 @@ namespace AcousticIR.Core
             sampleOffsetL = 0;
             sampleOffsetR = 0;
 
-            // Incoming direction = opposite of ray travel direction
-            // (where the sound "comes from" relative to the receiver)
             float3 incoming = -math.normalizesafe(arrivalDirection);
 
             switch (config.mode)
@@ -530,7 +855,7 @@ namespace AcousticIR.Core
                         config.msWidth, out gainL, out gainR);
                     break;
 
-                default: // Mono fallback - equal in both channels
+                default:
                     gainL = 1f;
                     gainR = 1f;
                     break;
@@ -540,7 +865,6 @@ namespace AcousticIR.Core
         /// <summary>
         /// XY Coincident Pair: Two cardioid microphones at ±halfAngle from forward.
         /// Cardioid pattern: gain = 0.5 * (1 + cos(θ))
-        /// where θ is angle between incoming sound and mic facing direction.
         /// </summary>
         static void ComputeXYGains(float3 incoming, float3 forward, float3 right,
             float halfAngleDeg, out float gainL, out float gainR)
@@ -549,12 +873,9 @@ namespace AcousticIR.Core
             float cosHalf = math.cos(halfAngleRad);
             float sinHalf = math.sin(halfAngleRad);
 
-            // Left mic faces forward-left: rotated -halfAngle from forward
             float3 leftMicDir = forward * cosHalf - right * sinHalf;
-            // Right mic faces forward-right: rotated +halfAngle from forward
             float3 rightMicDir = forward * cosHalf + right * sinHalf;
 
-            // Cardioid response: 0.5 * (1 + cos(angle between incoming and mic axis))
             float cosL = math.dot(incoming, leftMicDir);
             float cosR = math.dot(incoming, rightMicDir);
 
@@ -564,174 +885,37 @@ namespace AcousticIR.Core
 
         /// <summary>
         /// AB Spaced Pair: Two omnidirectional microphones with physical spacing.
-        /// Creates stereo image purely through inter-channel time differences (ICTD).
         /// ICTD = spacing * sin(azimuth) / speedOfSound.
         /// </summary>
         static void ComputeABOffsets(float3 incoming, float3 right,
             float spacingMeters, float speedOfSound, int sampleRate,
             out int sampleOffsetL, out int sampleOffsetR)
         {
-            // Project incoming direction onto the L-R axis
-            // Positive = from the right, negative = from the left
             float sinAzimuth = math.dot(incoming, right);
-
-            // Time difference: sound from the right arrives at the right mic first
             float halfSpacing = spacingMeters * 0.5f;
             float ictd = halfSpacing * sinAzimuth / speedOfSound;
-
-            // Convert to sample offsets
-            // Positive sinAzimuth (from right) → right channel earlier, left channel later
             int sampleShift = (int)math.round(ictd * sampleRate);
-            sampleOffsetL = sampleShift;    // Delayed for right-side sounds
-            sampleOffsetR = -sampleShift;   // Earlier for right-side sounds
+            sampleOffsetL = sampleShift;
+            sampleOffsetR = -sampleShift;
         }
 
         /// <summary>
         /// MS Mid-Side: Cardioid (mid) + figure-8 (side).
-        /// Mid = cardioid facing forward: 0.5 * (1 + cos(θ))
-        /// Side = figure-8 along right axis: sin(azimuth)
         /// L = Mid + width * Side, R = Mid - width * Side.
         /// </summary>
         static void ComputeMSGains(float3 incoming, float3 forward, float3 right,
             float width, out float gainL, out float gainR)
         {
-            // Mid channel: cardioid facing forward
             float cosFwd = math.dot(incoming, forward);
             float mid = 0.5f * (1f + cosFwd);
-
-            // Side channel: figure-8 pattern along right axis
-            // Positive for sounds from the left, negative for sounds from the right
-            // (figure-8 microphone facing left has positive lobe on the left)
             float side = -math.dot(incoming, right);
 
-            // Decode to L/R
             gainL = mid + width * side;
             gainR = mid - width * side;
 
-            // Clamp to prevent negative gains (can happen with extreme width)
             gainL = math.max(gainL, 0f);
             gainR = math.max(gainR, 0f);
         }
-
-        /// <summary>
-        /// Synthesizes decorrelated stereo late reverb tail.
-        /// Uses different random seeds for L/R channels with the same energy envelope.
-        /// This creates natural decorrelation that mimics real diffuse reverberation.
-        /// </summary>
-        static void SynthesizeLateTailStereo(float[] irL, float[] irR,
-            NativeList<RayArrival> arrivals, int sampleRate, float speedOfSound)
-        {
-            // Build energy histogram (same as mono - shared analysis)
-            const int binMs = 5;
-            int binSamples = binMs * sampleRate / 1000;
-            int numBins = irL.Length / binSamples + 1;
-            float[] binEnergy = new float[numBins];
-            float maxArrivalTime = 0f;
-            int reflectionCount = 0;
-
-            for (int i = 0; i < arrivals.Length; i++)
-            {
-                if (arrivals[i].bounceCount == 0) continue;
-
-                if (arrivals[i].time > maxArrivalTime)
-                    maxArrivalTime = arrivals[i].time;
-
-                int bin = (int)(arrivals[i].time * 1000f / binMs);
-                if (bin < 0 || bin >= numBins) continue;
-
-                float totalDist = arrivals[i].time * speedOfSound;
-                float distAtten = 1f / Mathf.Max(totalDist, 0.1f);
-                float amp = BandEnergyToAmplitude(arrivals[i].bandEnergy) * distAtten;
-                binEnergy[bin] += amp * amp;
-                reflectionCount++;
-            }
-
-            if (reflectionCount == 0 || maxArrivalTime < 0.02f)
-                return;
-
-            for (int b = 0; b < numBins; b++)
-                binEnergy[b] /= binSamples;
-
-            // Find peak and estimate RT60
-            float peakEnergyDensity = 0f;
-            int peakBin = 2;
-            for (int b = 2; b < numBins; b++)
-            {
-                if (binEnergy[b] > peakEnergyDensity)
-                {
-                    peakEnergyDensity = binEnergy[b];
-                    peakBin = b;
-                }
-            }
-
-            if (peakEnergyDensity < 1e-14f)
-                return;
-
-            float threshold60dB = peakEnergyDensity * 0.001f;
-            int lastActiveBin = peakBin;
-            for (int b = peakBin; b < numBins; b++)
-            {
-                if (binEnergy[b] > threshold60dB)
-                    lastActiveBin = b;
-            }
-
-            float peakTimeS = peakBin * binMs / 1000f;
-            float lastTimeS = lastActiveBin * binMs / 1000f;
-            float estimatedRT60 = (lastTimeS - peakTimeS) * 1.5f;
-            estimatedRT60 = math.clamp(estimatedRT60, 0.3f, (float)irL.Length / sampleRate);
-
-            float energyDecayRate = -13.816f / estimatedRT60;
-            float peakAmplitude = math.sqrt(peakEnergyDensity);
-
-            float mixingTimeMs = math.max(30f, peakBin * binMs * 0.8f);
-            int mixingStartSample = (int)(mixingTimeMs / 1000f * sampleRate);
-            int mixingEndSample = (int)((mixingTimeMs + 20f) / 1000f * sampleRate);
-
-            // Different seeds for L/R → decorrelated noise (natural diffuse reverb)
-            var rngL = new Unity.Mathematics.Random(12345);
-            var rngR = new Unity.Mathematics.Random(67890);
-
-            int tailSamplesGenerated = 0;
-            for (int s = mixingStartSample; s < irL.Length; s++)
-            {
-                float time = (float)s / sampleRate;
-                float timeSincePeak = time - peakTimeS;
-                if (timeSincePeak < 0f) timeSincePeak = 0f;
-
-                float envelope = peakAmplitude * math.exp(energyDecayRate * 0.5f * timeSincePeak);
-
-                if (envelope < 1e-9f)
-                    break;
-
-                float crossfade = 1f;
-                if (s < mixingEndSample)
-                {
-                    crossfade = (float)(s - mixingStartSample) / (float)(mixingEndSample - mixingStartSample);
-                    crossfade = math.clamp(crossfade, 0f, 1f);
-                    crossfade = crossfade * crossfade;
-                }
-
-                // Independent Gaussian noise for each channel
-                float u1L = math.max(rngL.NextFloat(), 1e-10f);
-                float u2L = rngL.NextFloat();
-                float gaussianL = math.sqrt(-2f * math.log(u1L)) * math.cos(2f * math.PI * u2L);
-
-                float u1R = math.max(rngR.NextFloat(), 1e-10f);
-                float u2R = rngR.NextFloat();
-                float gaussianR = math.sqrt(-2f * math.log(u1R)) * math.cos(2f * math.PI * u2R);
-
-                irL[s] += gaussianL * envelope * crossfade;
-                irR[s] += gaussianR * envelope * crossfade;
-                tailSamplesGenerated++;
-            }
-
-            Debug.Log($"[AcousticIR] Stereo late tail: RT60≈{estimatedRT60:F2}s, " +
-                      $"{tailSamplesGenerated} samples filled per channel");
-        }
-
-        // ====================================================================
-        // SHARED UTILITIES
-        // ====================================================================
 
         /// <summary>
         /// Normalizes the IR buffer so the peak value equals the target dB level.
