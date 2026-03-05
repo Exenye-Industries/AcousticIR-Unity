@@ -181,17 +181,27 @@ namespace AcousticIR.Core
         }
 
         /// <summary>
-        /// Synthesizes a stochastic late reverberation tail.
-        /// Uses Poisson-distributed noise impulses with an exponential decay
-        /// envelope matched to the energy decay from the raytracing data.
-        /// Only considers B1+ reflections (not direct sound) for energy estimation.
+        /// Synthesizes a dense late reverberation tail using energy-matched Gaussian noise.
+        ///
+        /// The approach:
+        /// 1. Build an energy histogram from the ray arrivals (energy per time bin)
+        /// 2. Fit an exponential decay to the histogram (estimates RT60)
+        /// 3. Generate dense Gaussian noise at EVERY sample from the mixing time onward
+        /// 4. Scale noise amplitude to match the measured energy decay curve
+        /// 5. Crossfade between discrete arrivals and noise around the mixing time
+        ///
+        /// This replaces the old sparse Poisson approach which produced
+        /// audible individual spikes instead of smooth reverb texture.
         /// </summary>
         static void SynthesizeLateTail(float[] ir, NativeList<RayArrival> arrivals,
             int sampleRate, float speedOfSound)
         {
-            // Find the energy decay curve from REFLECTION arrivals only (skip B0)
+            // === Step 1: Build energy histogram from arrivals ===
+            const int binMs = 5; // 5ms time bins
+            int binSamples = binMs * sampleRate / 1000;
+            int numBins = ir.Length / binSamples + 1;
+            float[] binEnergy = new float[numBins];
             float maxArrivalTime = 0f;
-            float totalReflectionEnergy = 0f;
             int reflectionCount = 0;
 
             for (int i = 0; i < arrivals.Length; i++)
@@ -201,59 +211,108 @@ namespace AcousticIR.Core
                 if (arrivals[i].time > maxArrivalTime)
                     maxArrivalTime = arrivals[i].time;
 
-                // Use distance-attenuated energy (same as AccumulateArrivals)
+                int bin = (int)(arrivals[i].time * 1000f / binMs);
+                if (bin < 0 || bin >= numBins) continue;
+
+                // Same amplitude calculation as AccumulateArrivals
                 float totalDist = arrivals[i].time * speedOfSound;
                 float distAtten = 1f / Mathf.Max(totalDist, 0.1f);
                 float amp = BandEnergyToAmplitude(arrivals[i].bandEnergy) * distAtten;
-                totalReflectionEnergy += amp * amp;
+                binEnergy[bin] += amp * amp; // accumulate energy (amplitude²)
                 reflectionCount++;
             }
 
-            if (totalReflectionEnergy < 1e-8f || maxArrivalTime < 0.05f || reflectionCount == 0)
+            if (reflectionCount == 0 || maxArrivalTime < 0.02f)
                 return;
 
-            float avgReflectionAmplitude = Mathf.Sqrt(totalReflectionEnergy / reflectionCount);
+            // Convert to energy density per sample
+            for (int b = 0; b < numBins; b++)
+                binEnergy[b] /= binSamples;
 
-            // Early reflection cutoff: 80ms
-            // Only synthesize late tail after this point
-            const float earlyReflectionCutoff = 0.08f;
-            int startSample = (int)(earlyReflectionCutoff * sampleRate);
-
-            // Estimate RT60 from the arrival data
-            // Heuristic: extend 2x beyond last arrival for natural tail
-            float estimatedRT60 = maxArrivalTime * 2.0f;
-            estimatedRT60 = math.clamp(estimatedRT60, 0.3f, (float)ir.Length / sampleRate);
-
-            // Decay rate: energy should drop 60dB over RT60
-            float decayRate = -6.908f / estimatedRT60; // ln(0.001) = -6.908
-
-            // Density increases with time (Poisson process)
-            var rng = new Unity.Mathematics.Random(42);
-            float baseDensity = 300f; // Impulses per second at the start
-
-            for (int s = startSample; s < ir.Length; s++)
+            // === Step 2: Find peak energy and estimate RT60 ===
+            // Skip first 2 bins (10ms) to avoid direct sound contamination
+            float peakEnergyDensity = 0f;
+            int peakBin = 2;
+            for (int b = 2; b < numBins; b++)
             {
-                float time = (float)s / sampleRate;
-                float envelope = math.exp(decayRate * time) * avgReflectionAmplitude * 0.5f;
-
-                if (envelope < 1e-8f)
-                    break;
-
-                // Density increases linearly with time (natural echo density growth)
-                float density = baseDensity * (1f + time * 8f);
-                float probability = density / sampleRate;
-
-                if (rng.NextFloat() < probability)
+                if (binEnergy[b] > peakEnergyDensity)
                 {
-                    // Random amplitude with envelope
-                    float noise = (rng.NextFloat() * 2f - 1f) * envelope;
-                    ir[s] += noise;
+                    peakEnergyDensity = binEnergy[b];
+                    peakBin = b;
                 }
             }
 
+            if (peakEnergyDensity < 1e-14f)
+                return;
+
+            // Find last bin above -60dB from peak
+            float threshold60dB = peakEnergyDensity * 0.001f;
+            int lastActiveBin = peakBin;
+            for (int b = peakBin; b < numBins; b++)
+            {
+                if (binEnergy[b] > threshold60dB)
+                    lastActiveBin = b;
+            }
+
+            // Estimate RT60 (extend beyond last active bin)
+            float peakTimeS = peakBin * binMs / 1000f;
+            float lastTimeS = lastActiveBin * binMs / 1000f;
+            float estimatedRT60 = (lastTimeS - peakTimeS) * 1.5f;
+            estimatedRT60 = math.clamp(estimatedRT60, 0.3f, (float)ir.Length / sampleRate);
+
+            // Decay rate for energy: E(t) = E0 * exp(-13.816/RT60 * t)
+            // (60dB = factor of 10^6 in energy = exp(13.816))
+            float energyDecayRate = -13.816f / estimatedRT60;
+
+            // Reference amplitude at the peak time
+            float peakAmplitude = math.sqrt(peakEnergyDensity);
+
+            // === Step 3: Generate dense Gaussian noise filling every sample ===
+            // Mixing time: where discrete early reflections transition to diffuse reverb
+            // Typically 50-80ms for rooms, can be longer for large spaces
+            float mixingTimeMs = math.max(30f, peakBin * binMs * 0.8f);
+            int mixingStartSample = (int)(mixingTimeMs / 1000f * sampleRate);
+            int mixingEndSample = (int)((mixingTimeMs + 20f) / 1000f * sampleRate); // 20ms crossfade
+
+            var rng = new Unity.Mathematics.Random(12345); // fixed seed for reproducibility
+
+            int tailSamplesGenerated = 0;
+            for (int s = mixingStartSample; s < ir.Length; s++)
+            {
+                float time = (float)s / sampleRate;
+                float timeSincePeak = time - peakTimeS;
+                if (timeSincePeak < 0f) timeSincePeak = 0f;
+
+                // Exponential decay envelope for amplitude
+                // (energy decays at energyDecayRate, amplitude at half that rate)
+                float envelope = peakAmplitude * math.exp(energyDecayRate * 0.5f * timeSincePeak);
+
+                if (envelope < 1e-9f)
+                    break;
+
+                // Crossfade: ramp noise from 0 to 1 over the mixing zone
+                float crossfade = 1f;
+                if (s < mixingEndSample)
+                {
+                    crossfade = (float)(s - mixingStartSample) / (float)(mixingEndSample - mixingStartSample);
+                    crossfade = math.clamp(crossfade, 0f, 1f);
+                    crossfade = crossfade * crossfade; // smooth ease-in
+                }
+
+                // Gaussian noise via Box-Muller transform
+                float u1 = math.max(rng.NextFloat(), 1e-10f);
+                float u2 = rng.NextFloat();
+                float gaussian = math.sqrt(-2f * math.log(u1)) * math.cos(2f * math.PI * u2);
+
+                // Add noise scaled by envelope and crossfade
+                ir[s] += gaussian * envelope * crossfade;
+                tailSamplesGenerated++;
+            }
+
             Debug.Log($"[AcousticIR] Late tail: RT60≈{estimatedRT60:F2}s, " +
-                      $"avgReflectionAmp={avgReflectionAmplitude:F4}, " +
-                      $"from {reflectionCount} reflections (max arrival {maxArrivalTime * 1000:F0}ms)");
+                      $"peakAmplitude={peakAmplitude:E3}, mixing@{mixingTimeMs:F0}ms, " +
+                      $"{tailSamplesGenerated} samples filled, " +
+                      $"from {reflectionCount} reflections (last at {maxArrivalTime * 1000:F0}ms)");
         }
 
         /// <summary>
