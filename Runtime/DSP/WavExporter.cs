@@ -7,18 +7,23 @@ namespace AcousticIR.DSP
     /// <summary>
     /// Exports impulse response data as WAV files.
     /// Supports 32-bit float and 16-bit PCM formats.
+    /// Handles file locking gracefully with automatic retry.
     /// </summary>
     public static class WavExporter
     {
         /// <summary>
         /// Exports IR samples as a 32-bit float WAV file.
+        /// If the file is locked (e.g. by REAPER), automatically tries
+        /// a timestamped alternative filename.
         /// </summary>
         /// <param name="samples">Mono IR samples (-1 to 1).</param>
         /// <param name="sampleRate">Sample rate in Hz.</param>
         /// <param name="filePath">Full output file path.</param>
         public static void ExportFloat32(float[] samples, int sampleRate, string filePath)
         {
-            using var stream = new FileStream(filePath, FileMode.Create);
+            string actualPath = ResolveWritablePath(filePath);
+
+            using var stream = new FileStream(actualPath, FileMode.Create, FileAccess.Write, FileShare.Read);
             using var writer = new BinaryWriter(stream);
 
             int channels = 1;
@@ -49,15 +54,18 @@ namespace AcousticIR.DSP
             for (int i = 0; i < samples.Length; i++)
                 writer.Write(samples[i]);
 
-            Debug.Log($"[AcousticIR] Exported WAV: {filePath} ({samples.Length} samples, {sampleRate}Hz, 32-bit float)");
+            Debug.Log($"[AcousticIR] Exported WAV: {actualPath} ({samples.Length} samples, {sampleRate}Hz, 32-bit float)");
         }
 
         /// <summary>
         /// Exports IR samples as a 16-bit PCM WAV file.
+        /// If the file is locked, automatically tries a timestamped alternative.
         /// </summary>
         public static void ExportPCM16(float[] samples, int sampleRate, string filePath)
         {
-            using var stream = new FileStream(filePath, FileMode.Create);
+            string actualPath = ResolveWritablePath(filePath);
+
+            using var stream = new FileStream(actualPath, FileMode.Create, FileAccess.Write, FileShare.Read);
             using var writer = new BinaryWriter(stream);
 
             int channels = 1;
@@ -92,7 +100,40 @@ namespace AcousticIR.DSP
                 writer.Write(pcm);
             }
 
-            Debug.Log($"[AcousticIR] Exported WAV: {filePath} ({samples.Length} samples, {sampleRate}Hz, 16-bit PCM)");
+            Debug.Log($"[AcousticIR] Exported WAV: {actualPath} ({samples.Length} samples, {sampleRate}Hz, 16-bit PCM)");
+        }
+
+        /// <summary>
+        /// Checks if the file can be written to. If the file is locked by another process
+        /// (e.g. REAPER, a media player, etc.), generates an alternative filename with a timestamp.
+        /// </summary>
+        static string ResolveWritablePath(string originalPath)
+        {
+            // If file doesn't exist yet, we're good
+            if (!File.Exists(originalPath))
+                return originalPath;
+
+            // Try to open the existing file to check if it's locked
+            try
+            {
+                using var test = new FileStream(originalPath, FileMode.Open, FileAccess.Write, FileShare.None);
+                // File is not locked, we can overwrite it
+                return originalPath;
+            }
+            catch (IOException)
+            {
+                // File is locked - generate alternative path with timestamp
+                string dir = Path.GetDirectoryName(originalPath);
+                string name = Path.GetFileNameWithoutExtension(originalPath);
+                string ext = Path.GetExtension(originalPath);
+                string timestamp = DateTime.Now.ToString("HHmmss");
+                string altPath = Path.Combine(dir ?? "", $"{name}_{timestamp}{ext}");
+
+                Debug.LogWarning($"[AcousticIR] File locked: {originalPath}\n" +
+                                 $"  Saving to: {altPath}\n" +
+                                 $"  (Close the program using the file to overwrite the original)");
+                return altPath;
+            }
         }
     }
 }

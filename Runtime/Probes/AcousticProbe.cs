@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using AcousticIR.Core;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace AcousticIR.Probes
 {
@@ -141,18 +142,23 @@ namespace AcousticIR.Probes
             Debug.Log($"[AcousticIR] Raytracing complete: {arrivals.Length} arrivals.");
             LogArrivalStatistics(arrivals);
 
-            // Debug ray visualization - uses Debug.DrawLine (visible in Scene view without selection)
+            // Debug ray visualization - rendered via OnRenderObject (GL.Begin/GL.End)
+            // Always visible in Scene AND Game view, no Gizmos toggle needed.
             if (showDebugRays && debugRayCount > 0)
             {
                 lastDebugRays = raytracer.TraceDebug(debugRayCount);
-                DrawDebugRaysImmediate(lastDebugRays);
-                Debug.Log($"[AcousticIR] Debug rays: {lastDebugRays.Count} segments from {debugRayCount} rays drawn in Scene view (visible for 30s).");
+                int receiverHits = 0;
+                foreach (var seg in lastDebugRays)
+                    if (seg.hitReceiver) receiverHits++;
+                Debug.Log($"[AcousticIR] Debug rays: {lastDebugRays.Count} segments from {debugRayCount} rays " +
+                          $"({receiverHits} hit receiver). Rays rendered via GL - visible in Scene AND Game view.");
             }
 
-            // Generate IR
+            // Generate IR (with B0 consolidation and 1/r distance attenuation)
             float[] irSamples = IRGenerator.Generate(
                 arrivals, sampleRate, irLength,
-                applyWindowing, windowTailPortion, synthesizeLateTail);
+                applyWindowing, windowTailPortion, synthesizeLateTail,
+                speedOfSound, rayCount);
 
             // Diagnose IR content
             DiagnoseIR(irSamples, sampleRate);
@@ -402,41 +408,139 @@ namespace AcousticIR.Probes
                 Debug.Log(sb.ToString());
         }
 
-        /// <summary>
-        /// Draws debug rays immediately using Debug.DrawLine.
-        /// These are visible in Scene view for 30 seconds without needing to select anything.
-        /// Green = high energy, Red = low energy, Cyan = hit receiver.
-        /// </summary>
-        static void DrawDebugRaysImmediate(List<DebugRaySegment> segments)
+        // ========================================================================
+        // GL-BASED RAY VISUALIZATION
+        // Uses OnRenderObject + GL.Begin/GL.End to render rays directly.
+        // This is ALWAYS visible in Scene view AND Game view,
+        // regardless of the Gizmos toggle.
+        // ========================================================================
+
+        static Material _glLineMaterial;
+
+        static Material GLLineMaterial
         {
-            if (segments == null || segments.Count == 0) return;
+            get
+            {
+                if (_glLineMaterial == null)
+                {
+                    // Use the built-in colored shader (available in all render pipelines)
+                    var shader = Shader.Find("Hidden/Internal-Colored");
+                    if (shader == null)
+                    {
+                        // Fallback for URP/HDRP where Hidden/Internal-Colored might not exist
+                        shader = Shader.Find("Sprites/Default");
+                    }
+                    if (shader == null)
+                    {
+                        shader = Shader.Find("Unlit/Color");
+                    }
+
+                    _glLineMaterial = new Material(shader);
+                    _glLineMaterial.hideFlags = HideFlags.HideAndDontSave;
+                    _glLineMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+                    _glLineMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+                    _glLineMaterial.SetInt("_Cull", (int)CullMode.Off);
+                    _glLineMaterial.SetInt("_ZWrite", 0);
+                    // Always draw on top for visibility
+                    _glLineMaterial.SetInt("_ZTest", (int)CompareFunction.Always);
+                }
+                return _glLineMaterial;
+            }
+        }
+
+        /// <summary>
+        /// Called by Unity every frame on every camera.
+        /// Draws debug rays using GL.Begin/GL.End which works
+        /// ALWAYS (no Gizmos toggle dependency).
+        /// </summary>
+        void OnRenderObject()
+        {
+            if (lastDebugRays == null || lastDebugRays.Count == 0) return;
+
+            var mat = GLLineMaterial;
+            if (mat == null) return;
+
+            mat.SetPass(0);
+
+            GL.PushMatrix();
+            // Use identity matrix - our coordinates are already in world space
+            // GL transforms from world to clip automatically when no matrix is set
+            GL.MultMatrix(Matrix4x4.identity);
+
+            GL.Begin(GL.LINES);
 
             float maxEnergy = 0f;
-            foreach (var seg in segments)
+            foreach (var seg in lastDebugRays)
                 if (seg.energy > maxEnergy) maxEnergy = seg.energy;
             if (maxEnergy < 1e-8f) maxEnergy = 1f;
 
-            int receiverHits = 0;
-            foreach (var seg in segments)
+            foreach (var seg in lastDebugRays)
             {
-                float t = seg.energy / maxEnergy;
-                Color color;
-
+                Color c;
                 if (seg.hitReceiver)
                 {
-                    color = Color.cyan;
-                    receiverHits++;
+                    c = Color.cyan;
                 }
                 else
                 {
-                    // Green (high energy) -> Red (low energy)
-                    color = Color.Lerp(Color.red, Color.green, t);
+                    float t = seg.energy / maxEnergy;
+                    c = Color.Lerp(Color.red, Color.green, t);
+                    c.a = 0.6f + 0.4f * t; // More transparent for low-energy rays
                 }
 
-                Debug.DrawLine(seg.start, seg.end, color, 30f);
+                GL.Color(c);
+                GL.Vertex(seg.start);
+                GL.Vertex(seg.end);
             }
 
-            Debug.Log($"[AcousticIR] Drew {segments.Count} ray segments ({receiverHits} hit receiver). Look at Scene view!");
+            GL.End();
+
+            // Also draw source (green) and receiver (blue) markers
+            DrawGLSphere(SourcePosition, 0.3f, new Color(0.2f, 0.9f, 0.2f, 0.8f));
+            DrawGLSphere(ReceiverPosition, receiverRadius, new Color(0.2f, 0.4f, 0.9f, 0.3f));
+
+            GL.PopMatrix();
+        }
+
+        /// <summary>
+        /// Draws a wireframe sphere approximation using GL.LINES (octahedron + circles).
+        /// </summary>
+        static void DrawGLSphere(Vector3 center, float radius, Color color)
+        {
+            GL.Begin(GL.LINES);
+            GL.Color(color);
+
+            // Draw 3 orthogonal circles (16 segments each)
+            const int segments = 16;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                for (int i = 0; i < segments; i++)
+                {
+                    float a1 = (float)i / segments * Mathf.PI * 2f;
+                    float a2 = (float)(i + 1) / segments * Mathf.PI * 2f;
+
+                    Vector3 p1, p2;
+                    if (axis == 0) // XY circle
+                    {
+                        p1 = center + new Vector3(Mathf.Cos(a1), Mathf.Sin(a1), 0) * radius;
+                        p2 = center + new Vector3(Mathf.Cos(a2), Mathf.Sin(a2), 0) * radius;
+                    }
+                    else if (axis == 1) // XZ circle
+                    {
+                        p1 = center + new Vector3(Mathf.Cos(a1), 0, Mathf.Sin(a1)) * radius;
+                        p2 = center + new Vector3(Mathf.Cos(a2), 0, Mathf.Sin(a2)) * radius;
+                    }
+                    else // YZ circle
+                    {
+                        p1 = center + new Vector3(0, Mathf.Cos(a1), Mathf.Sin(a1)) * radius;
+                        p2 = center + new Vector3(0, Mathf.Cos(a2), Mathf.Sin(a2)) * radius;
+                    }
+
+                    GL.Vertex(p1);
+                    GL.Vertex(p2);
+                }
+            }
+            GL.End();
         }
 
         void OnDrawGizmosSelected()
