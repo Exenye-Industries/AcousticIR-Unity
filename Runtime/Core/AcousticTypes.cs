@@ -4,6 +4,79 @@ using Unity.Mathematics;
 namespace AcousticIR.Core
 {
     /// <summary>
+    /// Stereo microphone configuration for IR generation.
+    /// </summary>
+    public enum StereoMode
+    {
+        /// <summary>Single omnidirectional receiver. Classic mono IR.</summary>
+        Mono,
+
+        /// <summary>
+        /// XY Coincident Pair: Two cardioid microphones at ±angle from forward.
+        /// Good mono compatibility, natural stereo image.
+        /// Default: ±45° (90° total angle).
+        /// </summary>
+        XY,
+
+        /// <summary>
+        /// AB Spaced Pair: Two omnidirectional microphones with physical spacing.
+        /// Wide stereo image from inter-channel time differences.
+        /// Default: 17cm spacing (head width).
+        /// </summary>
+        AB,
+
+        /// <summary>
+        /// MS Mid-Side: One cardioid (mid) + one figure-8 (side).
+        /// Perfect mono compatibility, adjustable stereo width in post.
+        /// L = Mid + Width*Side, R = Mid - Width*Side.
+        /// </summary>
+        MS
+    }
+
+    /// <summary>
+    /// Parameters for stereo microphone configuration.
+    /// </summary>
+    [System.Serializable]
+    public struct StereoConfig
+    {
+        /// <summary>Stereo microphone mode.</summary>
+        public StereoMode mode;
+
+        /// <summary>
+        /// XY: Half-angle between microphones in degrees (e.g. 45 = 90° total spread).
+        /// MS: Not used.
+        /// AB: Not used.
+        /// </summary>
+        [Range(15f, 90f)]
+        public float xyHalfAngleDeg;
+
+        /// <summary>
+        /// AB: Physical spacing between microphones in meters.
+        /// Default: 0.17m (approximate head width).
+        /// XY/MS: Not used.
+        /// </summary>
+        [Range(0.05f, 1f)]
+        public float abSpacingMeters;
+
+        /// <summary>
+        /// MS: Side signal width multiplier.
+        /// 0 = pure mono, 1 = standard width, >1 = extra wide.
+        /// XY/AB: Not used.
+        /// </summary>
+        [Range(0f, 2f)]
+        public float msWidth;
+
+        /// <summary>Default stereo configuration (XY at 90°).</summary>
+        public static StereoConfig Default => new StereoConfig
+        {
+            mode = StereoMode.XY,
+            xyHalfAngleDeg = 45f,
+            abSpacingMeters = 0.17f,
+            msWidth = 1f
+        };
+    }
+
+    /// <summary>
     /// 6 octave band absorption coefficients (125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz).
     /// All values range from 0.0 (fully reflective) to 1.0 (fully absorptive).
     /// </summary>

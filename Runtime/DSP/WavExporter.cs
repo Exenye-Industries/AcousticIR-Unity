@@ -58,6 +58,62 @@ namespace AcousticIR.DSP
         }
 
         /// <summary>
+        /// Exports stereo IR samples as a 32-bit float WAV file.
+        /// Interleaves L/R samples for standard stereo WAV format.
+        /// </summary>
+        /// <param name="left">Left channel IR samples (-1 to 1).</param>
+        /// <param name="right">Right channel IR samples (-1 to 1).</param>
+        /// <param name="sampleRate">Sample rate in Hz.</param>
+        /// <param name="filePath">Full output file path.</param>
+        public static void ExportStereoFloat32(float[] left, float[] right, int sampleRate, string filePath)
+        {
+            if (left.Length != right.Length)
+            {
+                Debug.LogError("[AcousticIR] Stereo export: L/R channels must have equal length!");
+                return;
+            }
+
+            string actualPath = ResolveWritablePath(filePath);
+
+            using var stream = new FileStream(actualPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+            using var writer = new BinaryWriter(stream);
+
+            int channels = 2;
+            int bitsPerSample = 32;
+            int byteRate = sampleRate * channels * bitsPerSample / 8;
+            int blockAlign = channels * bitsPerSample / 8;
+            int dataSize = left.Length * channels * (bitsPerSample / 8);
+
+            // RIFF header
+            writer.Write(new char[] { 'R', 'I', 'F', 'F' });
+            writer.Write(36 + dataSize);
+            writer.Write(new char[] { 'W', 'A', 'V', 'E' });
+
+            // fmt chunk
+            writer.Write(new char[] { 'f', 'm', 't', ' ' });
+            writer.Write(16);
+            writer.Write((short)3);         // Format: IEEE float
+            writer.Write((short)channels);
+            writer.Write(sampleRate);
+            writer.Write(byteRate);
+            writer.Write((short)blockAlign);
+            writer.Write((short)bitsPerSample);
+
+            // data chunk (interleaved: L0, R0, L1, R1, ...)
+            writer.Write(new char[] { 'd', 'a', 't', 'a' });
+            writer.Write(dataSize);
+
+            for (int i = 0; i < left.Length; i++)
+            {
+                writer.Write(left[i]);
+                writer.Write(right[i]);
+            }
+
+            Debug.Log($"[AcousticIR] Exported stereo WAV: {actualPath} " +
+                      $"({left.Length} frames, {sampleRate}Hz, 32-bit float, stereo)");
+        }
+
+        /// <summary>
         /// Exports IR samples as a 16-bit PCM WAV file.
         /// If the file is locked, automatically tries a timestamped alternative.
         /// </summary>

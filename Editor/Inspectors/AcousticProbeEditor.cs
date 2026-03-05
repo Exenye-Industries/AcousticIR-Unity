@@ -18,8 +18,10 @@ namespace AcousticIR.Editor.Inspectors
             EditorGUILayout.Space(10);
 
             // Big green Bake button - always works, no setup needed
+            string stereoLabel = probe.IsStereo ? $", {probe.StereoModeValue} stereo" : ", mono";
             GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
-            if (GUILayout.Button($"Bake IR  ({probe.RayCount} rays, {probe.MaxBounces} bounces)", GUILayout.Height(35)))
+            if (GUILayout.Button($"Bake IR  ({probe.RayCount} rays, {probe.MaxBounces} bounces{stereoLabel})",
+                GUILayout.Height(35)))
             {
                 BakeIR(probe);
             }
@@ -29,10 +31,16 @@ namespace AcousticIR.Editor.Inspectors
             if (probe.BakedIR != null && probe.BakedIR.SampleCount > 0)
             {
                 EditorGUILayout.Space(5);
+
+                string channelInfo = probe.BakedIR.IsStereo
+                    ? $"Stereo ({probe.BakedIR.StereoModeUsed})"
+                    : "Mono";
+
                 EditorGUILayout.HelpBox(
                     $"IR: {probe.BakedIR.LengthSeconds:F2}s | " +
                     $"{probe.BakedIR.SampleRate} Hz | " +
                     $"{probe.BakedIR.SampleCount:N0} samples | " +
+                    $"{channelInfo} | " +
                     $"{probe.BakedIR.RayCount} rays",
                     MessageType.Info);
 
@@ -68,15 +76,38 @@ namespace AcousticIR.Editor.Inspectors
 
         void ExportWav(IRData irData, bool pcm16)
         {
-            string defaultName = $"IR_{irData.SampleRate}Hz_{irData.LengthSeconds:F1}s";
+            string channelSuffix = irData.IsStereo ? "_stereo" : "_mono";
+            string defaultName = $"IR_{irData.SampleRate}Hz_{irData.LengthSeconds:F1}s{channelSuffix}";
             string path = EditorUtility.SaveFilePanel(
                 "Export IR as WAV", Application.dataPath, defaultName, "wav");
             if (string.IsNullOrEmpty(path)) return;
 
-            if (pcm16)
-                WavExporter.ExportPCM16(irData.Samples, irData.SampleRate, path);
+            if (irData.IsStereo)
+            {
+                // Export stereo WAV
+                float[] left = irData.GetLeftChannel();
+                float[] right = irData.GetRightChannel();
+
+                if (pcm16)
+                {
+                    // For 16-bit stereo, interleave and export
+                    // WavExporter doesn't have stereo PCM16 yet, so export as float32
+                    Debug.LogWarning("[AcousticIR] 16-bit PCM stereo not yet supported, exporting as 32-bit float.");
+                    WavExporter.ExportStereoFloat32(left, right, irData.SampleRate, path);
+                }
+                else
+                {
+                    WavExporter.ExportStereoFloat32(left, right, irData.SampleRate, path);
+                }
+            }
             else
-                WavExporter.ExportFloat32(irData.Samples, irData.SampleRate, path);
+            {
+                // Export mono WAV
+                if (pcm16)
+                    WavExporter.ExportPCM16(irData.Samples, irData.SampleRate, path);
+                else
+                    WavExporter.ExportFloat32(irData.Samples, irData.SampleRate, path);
+            }
         }
 
         void SaveAsAsset(IRData irData, string probeName)

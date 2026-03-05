@@ -315,6 +315,424 @@ namespace AcousticIR.Core
                       $"from {reflectionCount} reflections (last at {maxArrivalTime * 1000:F0}ms)");
         }
 
+        // ====================================================================
+        // STEREO IR GENERATION
+        // Uses arrival directions + virtual microphone patterns to create
+        // a naturally spatialized stereo impulse response.
+        // ====================================================================
+
+        /// <summary>
+        /// Generates a stereo impulse response from ray arrivals.
+        /// Uses arrival directions combined with virtual microphone patterns
+        /// to create a naturally spatialized stereo image.
+        /// </summary>
+        /// <param name="arrivals">Ray arrivals from AcousticRaytracer.Trace().</param>
+        /// <param name="receiverForward">Forward direction of the virtual microphone.</param>
+        /// <param name="receiverUp">Up direction of the virtual microphone.</param>
+        /// <param name="stereoConfig">Stereo microphone configuration.</param>
+        /// <param name="sampleRate">Output sample rate.</param>
+        /// <param name="irLengthSeconds">Maximum IR length in seconds.</param>
+        /// <param name="applyWindowing">Whether to apply Hann window to tail.</param>
+        /// <param name="windowTailPortion">Portion of tail to window.</param>
+        /// <param name="synthesizeLateTail">Whether to add stochastic late reverb.</param>
+        /// <param name="speedOfSound">Speed of sound in m/s.</param>
+        /// <param name="rayCount">Number of rays used.</param>
+        /// <returns>Tuple of (left, right) IR sample arrays.</returns>
+        public static (float[] left, float[] right) GenerateStereo(
+            NativeList<RayArrival> arrivals,
+            float3 receiverForward,
+            float3 receiverUp,
+            StereoConfig stereoConfig,
+            int sampleRate = 48000,
+            float irLengthSeconds = 2f,
+            bool applyWindowing = true,
+            float windowTailPortion = 0.1f,
+            bool synthesizeLateTail = true,
+            float speedOfSound = 343f,
+            int rayCount = 4096)
+        {
+            int sampleCount = (int)(irLengthSeconds * sampleRate);
+            float[] irL = new float[sampleCount];
+            float[] irR = new float[sampleCount];
+
+            if (arrivals.Length == 0)
+                return (irL, irR);
+
+            // Build orthonormal receiver basis
+            receiverForward = math.normalize(receiverForward);
+            receiverUp = math.normalize(receiverUp);
+            float3 receiverRight = math.normalize(math.cross(receiverForward, receiverUp));
+            receiverUp = math.cross(receiverRight, receiverForward);
+
+            // Phase 1: Accumulate arrivals with stereo microphone patterns
+            AccumulateStereoArrivals(irL, irR, arrivals, sampleRate, speedOfSound,
+                rayCount, receiverForward, receiverRight, stereoConfig);
+
+            // Phase 2: Synthesize late reverb tail (decorrelated stereo noise)
+            if (synthesizeLateTail)
+                SynthesizeLateTailStereo(irL, irR, arrivals, sampleRate, speedOfSound);
+
+            // Phase 3: Normalize both channels together to -1dB peak
+            NormalizePeakStereo(irL, irR, -1f);
+
+            // Phase 4: Apply windowing to both channels
+            if (applyWindowing)
+            {
+                AcousticMath.ApplyHannWindow(irL, windowTailPortion);
+                AcousticMath.ApplyHannWindow(irR, windowTailPortion);
+            }
+
+            Debug.Log($"[AcousticIR] Stereo IR generated: {stereoConfig.mode} mode, " +
+                      $"{sampleCount} samples/channel ({irLengthSeconds:F1}s @ {sampleRate}Hz)");
+
+            return (irL, irR);
+        }
+
+        /// <summary>
+        /// Accumulates ray arrivals into stereo IR buffers using microphone patterns.
+        /// Each arrival's direction relative to the receiver determines L/R gain.
+        /// </summary>
+        static void AccumulateStereoArrivals(float[] irL, float[] irR,
+            NativeList<RayArrival> arrivals, int sampleRate, float speedOfSound,
+            int rayCount, float3 receiverForward, float3 receiverRight,
+            StereoConfig config)
+        {
+            const int sincHalfWidth = 4;
+
+            // === Pass 1: Direct sound (bounce 0) - consolidated, same as mono ===
+            float directTimeSum = 0f;
+            float directEnergySum = 0f;
+            float3 directDirSum = float3.zero;
+            int directCount = 0;
+
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                if (arrivals[i].bounceCount == 0)
+                {
+                    directTimeSum += arrivals[i].time;
+                    directEnergySum += BandEnergyToAmplitude(arrivals[i].bandEnergy);
+                    directDirSum += arrivals[i].direction;
+                    directCount++;
+                }
+            }
+
+            if (directCount > 0)
+            {
+                float directTime = directTimeSum / directCount;
+                float directDistance = directTime * speedOfSound;
+                float directAmplitude = (directEnergySum / directCount)
+                    / Mathf.Max(directDistance, 0.1f);
+                float3 directDir = math.normalizesafe(directDirSum / directCount);
+
+                // Compute stereo gains for direct sound
+                ComputeStereoGains(directDir, receiverForward, receiverRight,
+                    config, speedOfSound, sampleRate,
+                    out float gainL, out float gainR,
+                    out int sampleOffsetL, out int sampleOffsetR);
+
+                // Place in L channel
+                float samplePosL = directTime * sampleRate + sampleOffsetL;
+                PlaceSincImpulse(irL, samplePosL, directAmplitude * gainL, sincHalfWidth);
+
+                // Place in R channel
+                float samplePosR = directTime * sampleRate + sampleOffsetR;
+                PlaceSincImpulse(irR, samplePosR, directAmplitude * gainR, sincHalfWidth);
+            }
+
+            // === Pass 2: Reflections (bounce >= 1) individually ===
+            int reflectionCount = 0;
+
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                RayArrival arrival = arrivals[i];
+                if (arrival.bounceCount == 0) continue;
+
+                float totalDistance = arrival.time * speedOfSound;
+                float distanceAtten = 1f / Mathf.Max(totalDistance, 0.1f);
+                float amplitude = BandEnergyToAmplitude(arrival.bandEnergy) * distanceAtten;
+
+                // Compute stereo gains from arrival direction
+                ComputeStereoGains(arrival.direction, receiverForward, receiverRight,
+                    config, speedOfSound, sampleRate,
+                    out float gainL, out float gainR,
+                    out int sampleOffsetL, out int sampleOffsetR);
+
+                // Place in L channel
+                float samplePosL = arrival.time * sampleRate + sampleOffsetL;
+                PlaceSincImpulse(irL, samplePosL, amplitude * gainL, sincHalfWidth);
+
+                // Place in R channel
+                float samplePosR = arrival.time * sampleRate + sampleOffsetR;
+                PlaceSincImpulse(irR, samplePosR, amplitude * gainR, sincHalfWidth);
+
+                reflectionCount++;
+            }
+
+            Debug.Log($"[AcousticIR] Stereo reflections: {reflectionCount} arrivals placed " +
+                      $"({config.mode} mode)");
+        }
+
+        /// <summary>
+        /// Places a single impulse into a buffer using sinc interpolation.
+        /// </summary>
+        static void PlaceSincImpulse(float[] buffer, float samplePos,
+            float amplitude, int sincHalfWidth)
+        {
+            int centerSample = (int)samplePos;
+            float fraction = samplePos - centerSample;
+
+            for (int k = -sincHalfWidth; k <= sincHalfWidth; k++)
+            {
+                int sampleIdx = centerSample + k;
+                if (sampleIdx < 0 || sampleIdx >= buffer.Length) continue;
+                float sincValue = AcousticMath.Sinc(k - fraction);
+                buffer[sampleIdx] += amplitude * sincValue;
+            }
+        }
+
+        /// <summary>
+        /// Computes left/right gains and sample offsets based on the stereo mode
+        /// and the arrival direction relative to the receiver orientation.
+        ///
+        /// For XY/MS: level differences only (sampleOffset = 0).
+        /// For AB: time differences (level = 1, offset varies).
+        /// </summary>
+        static void ComputeStereoGains(float3 arrivalDirection,
+            float3 receiverForward, float3 receiverRight,
+            StereoConfig config, float speedOfSound, int sampleRate,
+            out float gainL, out float gainR,
+            out int sampleOffsetL, out int sampleOffsetR)
+        {
+            sampleOffsetL = 0;
+            sampleOffsetR = 0;
+
+            // Incoming direction = opposite of ray travel direction
+            // (where the sound "comes from" relative to the receiver)
+            float3 incoming = -math.normalizesafe(arrivalDirection);
+
+            switch (config.mode)
+            {
+                case StereoMode.XY:
+                    ComputeXYGains(incoming, receiverForward, receiverRight,
+                        config.xyHalfAngleDeg, out gainL, out gainR);
+                    break;
+
+                case StereoMode.AB:
+                    gainL = 1f;
+                    gainR = 1f;
+                    ComputeABOffsets(incoming, receiverRight,
+                        config.abSpacingMeters, speedOfSound, sampleRate,
+                        out sampleOffsetL, out sampleOffsetR);
+                    break;
+
+                case StereoMode.MS:
+                    ComputeMSGains(incoming, receiverForward, receiverRight,
+                        config.msWidth, out gainL, out gainR);
+                    break;
+
+                default: // Mono fallback - equal in both channels
+                    gainL = 1f;
+                    gainR = 1f;
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// XY Coincident Pair: Two cardioid microphones at ±halfAngle from forward.
+        /// Cardioid pattern: gain = 0.5 * (1 + cos(θ))
+        /// where θ is angle between incoming sound and mic facing direction.
+        /// </summary>
+        static void ComputeXYGains(float3 incoming, float3 forward, float3 right,
+            float halfAngleDeg, out float gainL, out float gainR)
+        {
+            float halfAngleRad = math.radians(halfAngleDeg);
+            float cosHalf = math.cos(halfAngleRad);
+            float sinHalf = math.sin(halfAngleRad);
+
+            // Left mic faces forward-left: rotated -halfAngle from forward
+            float3 leftMicDir = forward * cosHalf - right * sinHalf;
+            // Right mic faces forward-right: rotated +halfAngle from forward
+            float3 rightMicDir = forward * cosHalf + right * sinHalf;
+
+            // Cardioid response: 0.5 * (1 + cos(angle between incoming and mic axis))
+            float cosL = math.dot(incoming, leftMicDir);
+            float cosR = math.dot(incoming, rightMicDir);
+
+            gainL = 0.5f * (1f + cosL);
+            gainR = 0.5f * (1f + cosR);
+        }
+
+        /// <summary>
+        /// AB Spaced Pair: Two omnidirectional microphones with physical spacing.
+        /// Creates stereo image purely through inter-channel time differences (ICTD).
+        /// ICTD = spacing * sin(azimuth) / speedOfSound.
+        /// </summary>
+        static void ComputeABOffsets(float3 incoming, float3 right,
+            float spacingMeters, float speedOfSound, int sampleRate,
+            out int sampleOffsetL, out int sampleOffsetR)
+        {
+            // Project incoming direction onto the L-R axis
+            // Positive = from the right, negative = from the left
+            float sinAzimuth = math.dot(incoming, right);
+
+            // Time difference: sound from the right arrives at the right mic first
+            float halfSpacing = spacingMeters * 0.5f;
+            float ictd = halfSpacing * sinAzimuth / speedOfSound;
+
+            // Convert to sample offsets
+            // Positive sinAzimuth (from right) → right channel earlier, left channel later
+            int sampleShift = (int)math.round(ictd * sampleRate);
+            sampleOffsetL = sampleShift;    // Delayed for right-side sounds
+            sampleOffsetR = -sampleShift;   // Earlier for right-side sounds
+        }
+
+        /// <summary>
+        /// MS Mid-Side: Cardioid (mid) + figure-8 (side).
+        /// Mid = cardioid facing forward: 0.5 * (1 + cos(θ))
+        /// Side = figure-8 along right axis: sin(azimuth)
+        /// L = Mid + width * Side, R = Mid - width * Side.
+        /// </summary>
+        static void ComputeMSGains(float3 incoming, float3 forward, float3 right,
+            float width, out float gainL, out float gainR)
+        {
+            // Mid channel: cardioid facing forward
+            float cosFwd = math.dot(incoming, forward);
+            float mid = 0.5f * (1f + cosFwd);
+
+            // Side channel: figure-8 pattern along right axis
+            // Positive for sounds from the left, negative for sounds from the right
+            // (figure-8 microphone facing left has positive lobe on the left)
+            float side = -math.dot(incoming, right);
+
+            // Decode to L/R
+            gainL = mid + width * side;
+            gainR = mid - width * side;
+
+            // Clamp to prevent negative gains (can happen with extreme width)
+            gainL = math.max(gainL, 0f);
+            gainR = math.max(gainR, 0f);
+        }
+
+        /// <summary>
+        /// Synthesizes decorrelated stereo late reverb tail.
+        /// Uses different random seeds for L/R channels with the same energy envelope.
+        /// This creates natural decorrelation that mimics real diffuse reverberation.
+        /// </summary>
+        static void SynthesizeLateTailStereo(float[] irL, float[] irR,
+            NativeList<RayArrival> arrivals, int sampleRate, float speedOfSound)
+        {
+            // Build energy histogram (same as mono - shared analysis)
+            const int binMs = 5;
+            int binSamples = binMs * sampleRate / 1000;
+            int numBins = irL.Length / binSamples + 1;
+            float[] binEnergy = new float[numBins];
+            float maxArrivalTime = 0f;
+            int reflectionCount = 0;
+
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                if (arrivals[i].bounceCount == 0) continue;
+
+                if (arrivals[i].time > maxArrivalTime)
+                    maxArrivalTime = arrivals[i].time;
+
+                int bin = (int)(arrivals[i].time * 1000f / binMs);
+                if (bin < 0 || bin >= numBins) continue;
+
+                float totalDist = arrivals[i].time * speedOfSound;
+                float distAtten = 1f / Mathf.Max(totalDist, 0.1f);
+                float amp = BandEnergyToAmplitude(arrivals[i].bandEnergy) * distAtten;
+                binEnergy[bin] += amp * amp;
+                reflectionCount++;
+            }
+
+            if (reflectionCount == 0 || maxArrivalTime < 0.02f)
+                return;
+
+            for (int b = 0; b < numBins; b++)
+                binEnergy[b] /= binSamples;
+
+            // Find peak and estimate RT60
+            float peakEnergyDensity = 0f;
+            int peakBin = 2;
+            for (int b = 2; b < numBins; b++)
+            {
+                if (binEnergy[b] > peakEnergyDensity)
+                {
+                    peakEnergyDensity = binEnergy[b];
+                    peakBin = b;
+                }
+            }
+
+            if (peakEnergyDensity < 1e-14f)
+                return;
+
+            float threshold60dB = peakEnergyDensity * 0.001f;
+            int lastActiveBin = peakBin;
+            for (int b = peakBin; b < numBins; b++)
+            {
+                if (binEnergy[b] > threshold60dB)
+                    lastActiveBin = b;
+            }
+
+            float peakTimeS = peakBin * binMs / 1000f;
+            float lastTimeS = lastActiveBin * binMs / 1000f;
+            float estimatedRT60 = (lastTimeS - peakTimeS) * 1.5f;
+            estimatedRT60 = math.clamp(estimatedRT60, 0.3f, (float)irL.Length / sampleRate);
+
+            float energyDecayRate = -13.816f / estimatedRT60;
+            float peakAmplitude = math.sqrt(peakEnergyDensity);
+
+            float mixingTimeMs = math.max(30f, peakBin * binMs * 0.8f);
+            int mixingStartSample = (int)(mixingTimeMs / 1000f * sampleRate);
+            int mixingEndSample = (int)((mixingTimeMs + 20f) / 1000f * sampleRate);
+
+            // Different seeds for L/R → decorrelated noise (natural diffuse reverb)
+            var rngL = new Unity.Mathematics.Random(12345);
+            var rngR = new Unity.Mathematics.Random(67890);
+
+            int tailSamplesGenerated = 0;
+            for (int s = mixingStartSample; s < irL.Length; s++)
+            {
+                float time = (float)s / sampleRate;
+                float timeSincePeak = time - peakTimeS;
+                if (timeSincePeak < 0f) timeSincePeak = 0f;
+
+                float envelope = peakAmplitude * math.exp(energyDecayRate * 0.5f * timeSincePeak);
+
+                if (envelope < 1e-9f)
+                    break;
+
+                float crossfade = 1f;
+                if (s < mixingEndSample)
+                {
+                    crossfade = (float)(s - mixingStartSample) / (float)(mixingEndSample - mixingStartSample);
+                    crossfade = math.clamp(crossfade, 0f, 1f);
+                    crossfade = crossfade * crossfade;
+                }
+
+                // Independent Gaussian noise for each channel
+                float u1L = math.max(rngL.NextFloat(), 1e-10f);
+                float u2L = rngL.NextFloat();
+                float gaussianL = math.sqrt(-2f * math.log(u1L)) * math.cos(2f * math.PI * u2L);
+
+                float u1R = math.max(rngR.NextFloat(), 1e-10f);
+                float u2R = rngR.NextFloat();
+                float gaussianR = math.sqrt(-2f * math.log(u1R)) * math.cos(2f * math.PI * u2R);
+
+                irL[s] += gaussianL * envelope * crossfade;
+                irR[s] += gaussianR * envelope * crossfade;
+                tailSamplesGenerated++;
+            }
+
+            Debug.Log($"[AcousticIR] Stereo late tail: RT60≈{estimatedRT60:F2}s, " +
+                      $"{tailSamplesGenerated} samples filled per channel");
+        }
+
+        // ====================================================================
+        // SHARED UTILITIES
+        // ====================================================================
+
         /// <summary>
         /// Normalizes the IR buffer so the peak value equals the target dB level.
         /// </summary>
@@ -336,6 +754,34 @@ namespace AcousticIR.Core
 
             for (int i = 0; i < ir.Length; i++)
                 ir[i] *= gain;
+        }
+
+        /// <summary>
+        /// Normalizes stereo IR buffers together so the louder channel's
+        /// peak equals the target dB level. Preserves the L/R balance.
+        /// </summary>
+        static void NormalizePeakStereo(float[] irL, float[] irR, float targetDb)
+        {
+            float peak = 0f;
+            for (int i = 0; i < irL.Length; i++)
+            {
+                float absL = math.abs(irL[i]);
+                float absR = math.abs(irR[i]);
+                if (absL > peak) peak = absL;
+                if (absR > peak) peak = absR;
+            }
+
+            if (peak < 1e-10f)
+                return;
+
+            float targetLinear = math.pow(10f, targetDb / 20f);
+            float gain = targetLinear / peak;
+
+            for (int i = 0; i < irL.Length; i++)
+            {
+                irL[i] *= gain;
+                irR[i] *= gain;
+            }
         }
     }
 }

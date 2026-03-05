@@ -69,6 +69,22 @@ namespace AcousticIR.Probes
         [Tooltip("Synthesize stochastic late reverb tail")]
         [SerializeField] bool synthesizeLateTail = true;
 
+        [Header("Stereo Configuration")]
+        [Tooltip("Stereo microphone mode. Mono = classic single-channel IR.")]
+        [SerializeField] StereoMode stereoMode = StereoMode.XY;
+
+        [Tooltip("XY: Half-angle between microphones in degrees (90° total = standard)")]
+        [Range(15f, 90f)]
+        [SerializeField] float xyHalfAngle = 45f;
+
+        [Tooltip("AB: Physical spacing between microphones in meters (0.17 = head width)")]
+        [Range(0.05f, 1f)]
+        [SerializeField] float abSpacing = 0.17f;
+
+        [Tooltip("MS: Side signal width multiplier (0=mono, 1=standard, >1=extra wide)")]
+        [Range(0f, 2f)]
+        [SerializeField] float msWidth = 1f;
+
         [Header("Debug Visualization")]
         [Tooltip("Show debug rays in Scene view after baking")]
         [SerializeField] bool showDebugRays = true;
@@ -97,6 +113,8 @@ namespace AcousticIR.Probes
         public int MaxBounces => maxBounces;
         public int SampleRate => sampleRate;
         public float IRLength => irLength;
+        public StereoMode StereoModeValue => stereoMode;
+        public bool IsStereo => stereoMode != StereoMode.Mono;
 
         /// <summary>
         /// Bakes an impulse response from the current scene geometry.
@@ -154,28 +172,60 @@ namespace AcousticIR.Probes
                           $"({receiverHits} hit receiver). Rays rendered via GL - visible in Scene AND Game view.");
             }
 
-            // Generate IR (with B0 consolidation and 1/r distance attenuation)
-            float[] irSamples = IRGenerator.Generate(
-                arrivals, sampleRate, irLength,
-                applyWindowing, windowTailPortion, synthesizeLateTail,
-                speedOfSound, rayCount);
-
-            // Diagnose IR content
-            DiagnoseIR(irSamples, sampleRate);
-
-            arrivals.Dispose();
-
-            // Store result
+            // Generate IR
             if (targetIR == null)
                 targetIR = ScriptableObject.CreateInstance<IRData>();
 
-            targetIR.SetData(irSamples, sampleRate, rayCount, maxBounces,
-                SourcePosition, ReceiverPosition);
+            if (stereoMode != StereoMode.Mono)
+            {
+                // Stereo generation with virtual microphone patterns
+                var stereoConfig = new StereoConfig
+                {
+                    mode = stereoMode,
+                    xyHalfAngleDeg = xyHalfAngle,
+                    abSpacingMeters = abSpacing,
+                    msWidth = msWidth
+                };
+
+                // Receiver orientation: forward = probe's forward, up = probe's up
+                Unity.Mathematics.float3 fwd = transform.forward;
+                Unity.Mathematics.float3 up = transform.up;
+
+                var (left, right) = IRGenerator.GenerateStereo(
+                    arrivals, fwd, up, stereoConfig,
+                    sampleRate, irLength,
+                    applyWindowing, windowTailPortion, synthesizeLateTail,
+                    speedOfSound, rayCount);
+
+                DiagnoseIR(left, sampleRate, "L");
+                DiagnoseIR(right, sampleRate, "R");
+
+                targetIR.SetStereoData(left, right, sampleRate, rayCount, maxBounces,
+                    SourcePosition, ReceiverPosition, stereoMode);
+
+                Debug.Log($"[AcousticIR] Stereo IR generated ({stereoMode}): " +
+                          $"{left.Length} samples/channel ({irLength:F1}s @ {sampleRate}Hz)");
+            }
+            else
+            {
+                // Mono generation (with B0 consolidation and 1/r distance attenuation)
+                float[] irSamples = IRGenerator.Generate(
+                    arrivals, sampleRate, irLength,
+                    applyWindowing, windowTailPortion, synthesizeLateTail,
+                    speedOfSound, rayCount);
+
+                DiagnoseIR(irSamples, sampleRate);
+
+                targetIR.SetData(irSamples, sampleRate, rayCount, maxBounces,
+                    SourcePosition, ReceiverPosition);
+
+                Debug.Log($"[AcousticIR] Mono IR generated: {irSamples.Length} samples " +
+                          $"({irLength:F1}s @ {sampleRate}Hz)");
+            }
+
+            arrivals.Dispose();
 
             bakedIR = targetIR;
-
-            Debug.Log($"[AcousticIR] IR generated: {irSamples.Length} samples " +
-                      $"({irLength:F1}s @ {sampleRate}Hz)");
 
             return targetIR;
         }
@@ -370,8 +420,9 @@ namespace AcousticIR.Probes
         /// <summary>
         /// Analyzes the generated IR buffer to check for energy distribution issues.
         /// </summary>
-        void DiagnoseIR(float[] ir, int sr)
+        void DiagnoseIR(float[] ir, int sr, string channelLabel = null)
         {
+            string prefix = channelLabel != null ? $"[{channelLabel}] " : "";
             float peak = 0f;
             int peakSample = 0;
             float totalEnergy = 0f;
@@ -396,14 +447,14 @@ namespace AcousticIR.Probes
             float earlyPct = totalEnergy > 0f ? (earlyEnergy / totalEnergy * 100f) : 0f;
 
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("[AcousticIR] IR DIAGNOSIS:");
+            sb.AppendLine($"[AcousticIR] IR DIAGNOSIS {prefix}:");
             sb.AppendLine($"  Peak: {peak:F6} at sample {peakSample} ({(float)peakSample / sr * 1000:F1}ms)");
             sb.AppendLine($"  Non-zero samples: {nonZeroSamples} / {ir.Length} ({100f * nonZeroSamples / ir.Length:F1}%)");
             sb.AppendLine($"  Last non-zero: sample {lastNonZeroSample} ({(float)lastNonZeroSample / sr * 1000:F1}ms)");
             sb.AppendLine($"  Energy: first 10ms={earlyPct:F1}%, rest={100f - earlyPct:F1}%");
 
             if (earlyPct > 90f)
-                Debug.LogError($"[AcousticIR] PROBLEM: {earlyPct:F0}% of IR energy is in the first 10ms! IR will sound like a click.");
+                Debug.LogError($"[AcousticIR] {prefix}PROBLEM: {earlyPct:F0}% of IR energy is in the first 10ms! IR will sound like a click.");
             else
                 Debug.Log(sb.ToString());
         }
