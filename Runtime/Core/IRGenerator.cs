@@ -391,18 +391,66 @@ namespace AcousticIR.Core
 
                 if (peakEnergy < 1e-14f) continue;
 
-                // Find last bin above -60dB threshold for this band
-                float thresh60dB = peakEnergy * 0.001f;
-                int lastActiveBin = peakBin;
-                for (int bin = peakBin; bin < numBins; bin++)
-                    if (bandBinEnergy[b][bin] > thresh60dB)
-                        lastActiveBin = bin;
-
-                // Estimate RT60 for this band (generous multiplier)
                 float peakTimeS = peakBin * binMs / 1000f;
-                float lastTimeS = lastActiveBin * binMs / 1000f;
-                float bandRT60 = (lastTimeS - peakTimeS) * 2.5f;
-                bandRT60 = math.clamp(bandRT60, 0.2f, (float)ir.Length / sampleRate);
+
+                // === RT60 estimation via exponential regression ===
+                // Fit log(E) = a + slope*t to the energy histogram.
+                // This extrapolates the decay beyond the arrival data,
+                // so even with 1.4s of arrivals we can estimate a 6s+ RT60.
+                float bandRT60;
+                {
+                    float noiseFloor = peakEnergy * 1e-6f; // -60dB below peak
+                    float sumT = 0f, sumLogE = 0f, sumTT = 0f, sumTLogE = 0f;
+                    int n = 0;
+
+                    for (int bin = peakBin; bin < numBins; bin++)
+                    {
+                        if (bandBinEnergy[b][bin] > noiseFloor)
+                        {
+                            float t = (bin - peakBin) * binMs / 1000f;
+                            float logE = math.log(bandBinEnergy[b][bin]);
+                            sumT += t;
+                            sumLogE += logE;
+                            sumTT += t * t;
+                            sumTLogE += t * logE;
+                            n++;
+                        }
+                    }
+
+                    float irLenS = (float)ir.Length / sampleRate;
+
+                    if (n >= 5)
+                    {
+                        float denom = n * sumTT - sumT * sumT;
+                        if (math.abs(denom) > 1e-12f)
+                        {
+                            float slope = (n * sumTLogE - sumT * sumLogE) / denom;
+                            // slope is energy decay rate: E(t) ~ exp(slope * t)
+                            // RT60 = time for -60dB = exp(-13.816)
+                            if (slope < -0.1f)
+                                bandRT60 = -13.816f / slope;
+                            else
+                                bandRT60 = irLenS; // Very slow decay → fill entire IR
+                        }
+                        else
+                        {
+                            bandRT60 = irLenS;
+                        }
+                    }
+                    else
+                    {
+                        // Too few data points - use fallback multiplier
+                        float thresh60dB = peakEnergy * 0.001f;
+                        int lastActiveBin = peakBin;
+                        for (int bin = peakBin; bin < numBins; bin++)
+                            if (bandBinEnergy[b][bin] > thresh60dB)
+                                lastActiveBin = bin;
+                        float lastTimeS = lastActiveBin * binMs / 1000f;
+                        bandRT60 = (lastTimeS - peakTimeS) * 3.0f;
+                    }
+
+                    bandRT60 = math.clamp(bandRT60, 0.3f, irLenS);
+                }
 
                 overallRT60 = math.max(overallRT60, bandRT60);
                 activeBands++;
@@ -725,16 +773,60 @@ namespace AcousticIR.Core
 
                 if (peakEnergy < 1e-14f) continue;
 
-                float thresh60dB = peakEnergy * 0.001f;
-                int lastActiveBin = peakBin;
-                for (int bin = peakBin; bin < numBins; bin++)
-                    if (bandBinEnergy[b][bin] > thresh60dB)
-                        lastActiveBin = bin;
-
                 float peakTimeS = peakBin * binMs / 1000f;
-                float lastTimeS = lastActiveBin * binMs / 1000f;
-                float bandRT60 = (lastTimeS - peakTimeS) * 2.5f;
-                bandRT60 = math.clamp(bandRT60, 0.2f, (float)irL.Length / sampleRate);
+
+                // RT60 estimation via exponential regression (same as mono)
+                float bandRT60;
+                {
+                    float noiseFloor = peakEnergy * 1e-6f;
+                    float sumT = 0f, sumLogE = 0f, sumTT = 0f, sumTLogE = 0f;
+                    int n = 0;
+
+                    for (int bin = peakBin; bin < numBins; bin++)
+                    {
+                        if (bandBinEnergy[b][bin] > noiseFloor)
+                        {
+                            float t = (bin - peakBin) * binMs / 1000f;
+                            float logE = math.log(bandBinEnergy[b][bin]);
+                            sumT += t;
+                            sumLogE += logE;
+                            sumTT += t * t;
+                            sumTLogE += t * logE;
+                            n++;
+                        }
+                    }
+
+                    float irLenS = (float)irL.Length / sampleRate;
+
+                    if (n >= 5)
+                    {
+                        float denom = n * sumTT - sumT * sumT;
+                        if (math.abs(denom) > 1e-12f)
+                        {
+                            float slope = (n * sumTLogE - sumT * sumLogE) / denom;
+                            if (slope < -0.1f)
+                                bandRT60 = -13.816f / slope;
+                            else
+                                bandRT60 = irLenS;
+                        }
+                        else
+                        {
+                            bandRT60 = irLenS;
+                        }
+                    }
+                    else
+                    {
+                        float thresh60dB = peakEnergy * 0.001f;
+                        int lastActiveBin = peakBin;
+                        for (int bin = peakBin; bin < numBins; bin++)
+                            if (bandBinEnergy[b][bin] > thresh60dB)
+                                lastActiveBin = bin;
+                        float lastTimeS = lastActiveBin * binMs / 1000f;
+                        bandRT60 = (lastTimeS - peakTimeS) * 3.0f;
+                    }
+
+                    bandRT60 = math.clamp(bandRT60, 0.3f, irLenS);
+                }
 
                 overallRT60 = math.max(overallRT60, bandRT60);
                 activeBands++;

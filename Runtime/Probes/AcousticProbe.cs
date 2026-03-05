@@ -13,17 +13,19 @@ namespace AcousticIR.Probes
     public class AcousticProbe : MonoBehaviour
     {
         [Header("Ray Parameters")]
-        [Tooltip("Number of rays emitted from the source position")]
-        [Range(64, 65536)]
-        [SerializeField] int rayCount = 4096;
+        [Tooltip("Number of rays emitted from the source. More rays = denser IR but slower bake.\n" +
+                 "Quick test: 4096 | Standard: 32768 | High: 131072 | Ultra: 500000")]
+        [Min(64)]
+        [SerializeField] int rayCount = 32768;
 
-        [Tooltip("Maximum number of bounces per ray")]
-        [Range(1, 32)]
-        [SerializeField] int maxBounces = 8;
+        [Tooltip("Maximum bounces per ray. More bounces = longer reverb tail.\n" +
+                 "Small room: 32 | Large room: 64 | Hall: 128 | Cave: 200+")]
+        [Range(1, 256)]
+        [SerializeField] int maxBounces = 64;
 
         [Tooltip("Maximum total path length per ray in meters")]
-        [Range(10f, 500f)]
-        [SerializeField] float maxDistance = 100f;
+        [Range(10f, 2000f)]
+        [SerializeField] float maxDistance = 500f;
 
         [Tooltip("Minimum total band energy before ray termination")]
         [Range(0.0001f, 0.1f)]
@@ -55,9 +57,9 @@ namespace AcousticIR.Probes
         [Tooltip("Sample rate of the generated IR")]
         [SerializeField] int sampleRate = 48000;
 
-        [Tooltip("Maximum IR length in seconds")]
-        [Range(0.5f, 6f)]
-        [SerializeField] float irLength = 2f;
+        [Tooltip("Maximum IR length in seconds.\nSmall room: 1-2s | Large room: 3-4s | Hall: 4-6s | Cave: 6-15s")]
+        [Range(0.5f, 20f)]
+        [SerializeField] float irLength = 4f;
 
         [Tooltip("Apply Hann window to IR tail")]
         [SerializeField] bool applyWindowing = true;

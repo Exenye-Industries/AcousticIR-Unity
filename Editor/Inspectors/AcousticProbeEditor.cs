@@ -15,13 +15,28 @@ namespace AcousticIR.Editor.Inspectors
 
             var probe = (AcousticProbe)target;
 
+            EditorGUILayout.Space(5);
+
+            // === Quality Presets ===
+            EditorGUILayout.LabelField("Quality Presets", EditorStyles.boldLabel);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Quick\n4K / 32b / 2s", EditorStyles.miniButtonLeft, GUILayout.Height(35)))
+                ApplyPreset(4096, 32, 2f, 100f);
+            if (GUILayout.Button("Standard\n32K / 64b / 4s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
+                ApplyPreset(32768, 64, 4f, 500f);
+            if (GUILayout.Button("High\n131K / 128b / 6s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
+                ApplyPreset(131072, 128, 6f, 500f);
+            if (GUILayout.Button("Ultra\n500K / 200b / 10s", EditorStyles.miniButtonRight, GUILayout.Height(35)))
+                ApplyPreset(500000, 200, 10f, 1000f);
+            EditorGUILayout.EndHorizontal();
+
             EditorGUILayout.Space(10);
 
-            // Big green Bake button - always works, no setup needed
+            // Big green Bake button
             string stereoLabel = probe.IsStereo ? $", {probe.StereoModeValue} stereo" : ", mono";
             GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
             if (GUILayout.Button($"Bake IR  ({probe.RayCount} rays, {probe.MaxBounces} bounces{stereoLabel})",
-                GUILayout.Height(35)))
+                GUILayout.Height(40)))
             {
                 BakeIR(probe);
             }
@@ -108,6 +123,15 @@ namespace AcousticIR.Editor.Inspectors
                 else
                     WavExporter.ExportFloat32(irData.Samples, irData.SampleRate, path);
             }
+        }
+
+        void ApplyPreset(int rays, int bounces, float length, float distance)
+        {
+            serializedObject.FindProperty("rayCount").intValue = rays;
+            serializedObject.FindProperty("maxBounces").intValue = bounces;
+            serializedObject.FindProperty("irLength").floatValue = length;
+            serializedObject.FindProperty("maxDistance").floatValue = distance;
+            serializedObject.ApplyModifiedProperties();
         }
 
         void SaveAsAsset(IRData irData, string probeName)
