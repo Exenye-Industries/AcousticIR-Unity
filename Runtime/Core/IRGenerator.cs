@@ -251,18 +251,19 @@ namespace AcousticIR.Core
             if (directCount > 0)
             {
                 float directTime = directTimeSum / directCount;
-                float directDistance = directTime * speedOfSound;
-                float distAtten = 1f / Mathf.Max(directDistance, 0.1f);
                 float samplePos = directTime * sampleRate;
-                float amplitude = (directEnergySum / directCount) * distAtten;
+                float amplitude = directEnergySum / directCount;
 
                 PlaceSincImpulse(ir, samplePos, amplitude, sincHalfWidth);
 
                 Debug.Log($"[AcousticIR] Direct sound: {directCount} B0 arrivals → 1 impulse at " +
-                          $"{directTime * 1000:F1}ms, distance={directDistance:F1}m, amp={amplitude:F4}");
+                          $"{directTime * 1000:F1}ms, amp={amplitude:F4}");
             }
 
             // === Pass 2: ALL reflections — spectrally shaped ===
+            // NO distance attenuation here! The raytracer already handles 1/r²:
+            // - Stochastic arrivals: implicit via receiver sphere hit probability
+            // - NEE arrivals: explicit via solid angle weight (r²/2d²)
             int reflectionCount = 0;
             float maxTime = 0f;
 
@@ -271,13 +272,11 @@ namespace AcousticIR.Core
                 RayArrival arrival = arrivals[i];
                 if (arrival.bounceCount == 0) continue;
 
-                float totalDistance = arrival.time * speedOfSound;
-                float distAtten = 1f / Mathf.Max(totalDistance, 0.1f);
                 float samplePos = arrival.time * sampleRate;
 
                 if (samplePos >= 0 && samplePos < ir.Length - BandKernelLength)
                 {
-                    PlaceMultiBandImpulse(ir, samplePos, arrival.bandEnergy, distAtten, bandKernels);
+                    PlaceMultiBandImpulse(ir, samplePos, arrival.bandEnergy, bandKernels);
                     reflectionCount++;
                 }
 
@@ -290,15 +289,16 @@ namespace AcousticIR.Core
 
         /// <summary>
         /// Places a spectrally-shaped impulse using pre-computed band kernels.
+        /// Band energies are used directly — no additional distance attenuation.
         /// </summary>
         static void PlaceMultiBandImpulse(float[] buffer, float samplePos,
-            AbsorptionCoefficients bandEnergy, float distAtten, float[][] bandKernels)
+            AbsorptionCoefficients bandEnergy, float[][] bandKernels)
         {
             int center = (int)math.round(samplePos);
 
             for (int b = 0; b < NumBands; b++)
             {
-                float bandAmp = GetBandValue(bandEnergy, b) * distAtten;
+                float bandAmp = GetBandValue(bandEnergy, b);
                 if (bandAmp < 1e-8f) continue;
 
                 for (int i = 0; i < BandKernelLength; i++)
@@ -345,6 +345,9 @@ namespace AcousticIR.Core
             receiverUp = math.cross(receiverRight, receiverForward);
 
             float[][] bandKernels = PrecomputeBandKernels(sampleRate);
+
+            // === DIAGNOSTICS: Dump arrival data + kernel info to file ===
+            DumpDiagnostics(arrivals, sampleRate, speedOfSound, bandKernels);
 
             // Place ALL arrivals with stereo imaging
             AccumulateAllStereoArrivals(irL, irR, arrivals, sampleRate, speedOfSound,
@@ -396,10 +399,8 @@ namespace AcousticIR.Core
             if (directCount > 0)
             {
                 float directTime = directTimeSum / directCount;
-                float directDistance = directTime * speedOfSound;
-                float distAtten = 1f / Mathf.Max(directDistance, 0.1f);
                 float3 directDir = math.normalizesafe(directDirSum / directCount);
-                float amplitude = (directEnergySum / directCount) * distAtten;
+                float amplitude = directEnergySum / directCount;
 
                 ComputeStereoGains(directDir, receiverForward, receiverRight,
                     config, speedOfSound, sampleRate,
@@ -414,6 +415,7 @@ namespace AcousticIR.Core
             }
 
             // === Pass 2: ALL reflections — spectrally shaped stereo ===
+            // NO distance attenuation — already handled by raytracer
             int reflectionCount = 0;
             float maxTime = 0f;
 
@@ -421,9 +423,6 @@ namespace AcousticIR.Core
             {
                 RayArrival arrival = arrivals[i];
                 if (arrival.bounceCount == 0) continue;
-
-                float totalDistance = arrival.time * speedOfSound;
-                float distAtten = 1f / Mathf.Max(totalDistance, 0.1f);
 
                 ComputeStereoGains(arrival.direction, receiverForward, receiverRight,
                     config, speedOfSound, sampleRate,
@@ -437,7 +436,7 @@ namespace AcousticIR.Core
                     samplePosR >= 0 && samplePosR < irR.Length - BandKernelLength)
                 {
                     PlaceMultiBandImpulseStereo(irL, irR, samplePosL, samplePosR,
-                        arrival.bandEnergy, distAtten, gainL, gainR, bandKernels);
+                        arrival.bandEnergy, gainL, gainR, bandKernels);
                     reflectionCount++;
                 }
 
@@ -450,10 +449,11 @@ namespace AcousticIR.Core
 
         /// <summary>
         /// Places a spectrally-shaped stereo impulse using pre-computed band kernels.
+        /// Band energies are used directly — no additional distance attenuation.
         /// </summary>
         static void PlaceMultiBandImpulseStereo(float[] bufferL, float[] bufferR,
             float samplePosL, float samplePosR,
-            AbsorptionCoefficients bandEnergy, float distAtten,
+            AbsorptionCoefficients bandEnergy,
             float gainL, float gainR, float[][] bandKernels)
         {
             int centerL = (int)math.round(samplePosL);
@@ -461,7 +461,7 @@ namespace AcousticIR.Core
 
             for (int b = 0; b < NumBands; b++)
             {
-                float bandAmp = GetBandValue(bandEnergy, b) * distAtten;
+                float bandAmp = GetBandValue(bandEnergy, b);
                 if (bandAmp < 1e-8f) continue;
 
                 float ampL = bandAmp * gainL;
