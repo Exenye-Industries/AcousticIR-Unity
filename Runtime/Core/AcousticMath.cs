@@ -71,14 +71,36 @@ namespace AcousticIR.Core
 
         /// <summary>
         /// Hybrid reflection blending between specular and diffuse based on material diffusion.
-        /// diffusion=0: perfect mirror, diffusion=1: fully Lambertian.
+        /// Enforces minimum scattering (no real surface is a perfect mirror) and adds
+        /// micro-roughness jitter for surface imperfections.
         /// </summary>
         public static float3 HybridReflect(float3 direction, float3 normal,
             float diffusion, ref Random rng)
         {
+            // No real surface is perfectly specular - enforce minimum scattering
+            float effectiveDiffusion = math.max(diffusion, 0.05f);
+
             float3 specular = Reflect(direction, normal);
             float3 diffuse = DiffuseReflect(normal, ref rng);
-            return math.normalize(math.lerp(specular, diffuse, diffusion));
+            float3 result = math.normalize(math.lerp(specular, diffuse, effectiveDiffusion));
+
+            // Add micro-roughness jitter (~2° cone) for surface imperfections
+            float jitterAngle = 0.035f; // ~2 degrees in radians
+            float3 up = math.abs(result.y) < 0.999f
+                ? new float3(0f, 1f, 0f)
+                : new float3(1f, 0f, 0f);
+            float3 tangent = math.normalize(math.cross(up, result));
+            float3 bitangent = math.cross(result, tangent);
+            float angle = rng.NextFloat() * 2f * math.PI;
+            float radius = rng.NextFloat() * jitterAngle;
+            result = math.normalize(result + tangent * (math.cos(angle) * radius)
+                                           + bitangent * (math.sin(angle) * radius));
+
+            // Ensure result points away from surface
+            if (math.dot(result, normal) < 0.001f)
+                result = DiffuseReflect(normal, ref rng);
+
+            return result;
         }
 
         /// <summary>

@@ -137,6 +137,21 @@ namespace AcousticIR.Core
         /// Full energy (1.0 in all bands). Used as initial ray energy.
         /// </summary>
         public static AbsorptionCoefficients FullEnergy => Uniform(1f);
+
+        /// <summary>
+        /// Realistic default surface absorption (painted concrete/plaster).
+        /// Low frequencies reflect well, high frequencies are absorbed more.
+        /// This is physically correct - no real surface has uniform absorption.
+        /// </summary>
+        public static AbsorptionCoefficients DefaultSurface => new AbsorptionCoefficients
+        {
+            band125Hz = 0.02f,
+            band250Hz = 0.03f,
+            band500Hz = 0.04f,
+            band1kHz  = 0.06f,
+            band2kHz  = 0.08f,
+            band4kHz  = 0.12f
+        };
     }
 
     /// <summary>

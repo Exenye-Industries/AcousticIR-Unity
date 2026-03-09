@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using AcousticIR.Core;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -14,18 +15,19 @@ namespace AcousticIR.Probes
     {
         [Header("Ray Parameters")]
         [Tooltip("Number of rays emitted from the source. More rays = denser IR but slower bake.\n" +
-                 "Quick test: 4096 | Standard: 32768 | High: 131072 | Ultra: 500000")]
+                 "Quick: 4K | Standard: 64K | High: 500K | Ultra: 2M | Extreme: 6M+\n" +
+                 "Offline baking can take minutes at high ray counts.")]
         [Min(64)]
-        [SerializeField] int rayCount = 32768;
+        [SerializeField] int rayCount = 65536;
 
         [Tooltip("Maximum bounces per ray. More bounces = longer reverb tail.\n" +
-                 "Small room: 32 | Large room: 64 | Hall: 128 | Cave: 200+")]
-        [Range(1, 256)]
-        [SerializeField] int maxBounces = 64;
+                 "Small room: 32 | Large room: 64-128 | Hall: 128-256 | Cave: 256-512")]
+        [Range(1, 512)]
+        [SerializeField] int maxBounces = 128;
 
         [Tooltip("Maximum total path length per ray in meters")]
-        [Range(10f, 2000f)]
-        [SerializeField] float maxDistance = 500f;
+        [Range(10f, 5000f)]
+        [SerializeField] float maxDistance = 1000f;
 
         [Tooltip("Minimum total band energy before ray termination")]
         [Range(0.0001f, 0.1f)]
@@ -45,13 +47,16 @@ namespace AcousticIR.Probes
         [SerializeField] float speedOfSound = 343f;
 
         [Header("Default Surface Material")]
-        [Tooltip("Absorption for surfaces without AcousticSurface component")]
+        [Tooltip("Overall absorption strength for surfaces without AcousticSurface component.\n" +
+                 "Absorption is frequency-dependent (HF absorbed more than LF, like real surfaces).\n" +
+                 "0.05 = very reflective (tile/glass) | 0.1 = standard (concrete/plaster) | 0.3 = absorptive (carpet/curtain)")]
         [Range(0f, 1f)]
         [SerializeField] float defaultAbsorption = 0.1f;
 
-        [Tooltip("Diffusion for surfaces without AcousticSurface component")]
+        [Tooltip("Surface diffusion/scattering (0 = mirror, 1 = fully diffuse).\n" +
+                 "Real surfaces are never perfectly smooth. 0.3 = polished | 0.5 = typical | 0.8 = rough")]
         [Range(0f, 1f)]
-        [SerializeField] float defaultDiffusion = 0.3f;
+        [SerializeField] float defaultDiffusion = 0.5f;
 
         [Header("IR Output")]
         [Tooltip("Sample rate of the generated IR")]
@@ -130,9 +135,21 @@ namespace AcousticIR.Probes
             CollectMaterials(materialList, colliderMapping);
 
             // Default material for all surfaces without AcousticSurface
+            // Uses frequency-dependent absorption (HF absorbed more than LF)
+            // scaled by the user's overall absorption setting
+            var baseAbsorption = AbsorptionCoefficients.DefaultSurface;
+            float scale = defaultAbsorption / 0.1f; // normalize to user setting
             var defaultMaterial = new MaterialData
             {
-                absorption = AbsorptionCoefficients.Uniform(defaultAbsorption),
+                absorption = new AbsorptionCoefficients
+                {
+                    band125Hz = math.clamp(baseAbsorption.band125Hz * scale, 0f, 0.99f),
+                    band250Hz = math.clamp(baseAbsorption.band250Hz * scale, 0f, 0.99f),
+                    band500Hz = math.clamp(baseAbsorption.band500Hz * scale, 0f, 0.99f),
+                    band1kHz  = math.clamp(baseAbsorption.band1kHz  * scale, 0f, 0.99f),
+                    band2kHz  = math.clamp(baseAbsorption.band2kHz  * scale, 0f, 0.99f),
+                    band4kHz  = math.clamp(baseAbsorption.band4kHz  * scale, 0f, 0.99f)
+                },
                 diffusion = defaultDiffusion
             };
 

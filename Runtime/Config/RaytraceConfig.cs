@@ -12,16 +12,16 @@ namespace AcousticIR.Config
     {
         [Header("Ray Parameters")]
         [Tooltip("Number of rays emitted from the source position")]
-        [Range(64, 65536)]
-        [SerializeField] int rayCount = 4096;
+        [Range(64, 10000000)]
+        [SerializeField] int rayCount = 32768;
 
         [Tooltip("Maximum number of bounces per ray")]
-        [Range(1, 32)]
-        [SerializeField] int maxBounces = 8;
+        [Range(1, 512)]
+        [SerializeField] int maxBounces = 64;
 
         [Tooltip("Maximum total path length per ray in meters")]
-        [Range(10f, 500f)]
-        [SerializeField] float maxDistance = 100f;
+        [Range(10f, 5000f)]
+        [SerializeField] float maxDistance = 500f;
 
         [Tooltip("Minimum total band energy before ray termination (lower = more accurate, slower)")]
         [Range(0.0001f, 0.1f)]
@@ -44,7 +44,7 @@ namespace AcousticIR.Config
 
         [Tooltip("Diffusion used for surfaces without an AcousticSurface component")]
         [Range(0f, 1f)]
-        [SerializeField] float defaultDiffusion = 0.3f;
+        [SerializeField] float defaultDiffusion = 0.5f;
 
         public int RayCount => rayCount;
         public int MaxBounces => maxBounces;
@@ -73,10 +73,26 @@ namespace AcousticIR.Config
         /// <summary>
         /// Returns the default MaterialData for untagged surfaces.
         /// </summary>
-        public MaterialData DefaultMaterial => new MaterialData
+        public MaterialData DefaultMaterial
         {
-            absorption = AbsorptionCoefficients.Uniform(defaultAbsorption),
-            diffusion = defaultDiffusion
-        };
+            get
+            {
+                var baseAbs = AbsorptionCoefficients.DefaultSurface;
+                float scale = defaultAbsorption / 0.1f;
+                return new MaterialData
+                {
+                    absorption = new AbsorptionCoefficients
+                    {
+                        band125Hz = Mathf.Clamp01(baseAbs.band125Hz * scale),
+                        band250Hz = Mathf.Clamp01(baseAbs.band250Hz * scale),
+                        band500Hz = Mathf.Clamp01(baseAbs.band500Hz * scale),
+                        band1kHz  = Mathf.Clamp01(baseAbs.band1kHz  * scale),
+                        band2kHz  = Mathf.Clamp01(baseAbs.band2kHz  * scale),
+                        band4kHz  = Mathf.Clamp01(baseAbs.band4kHz  * scale)
+                    },
+                    diffusion = defaultDiffusion
+                };
+            }
+        }
     }
 }

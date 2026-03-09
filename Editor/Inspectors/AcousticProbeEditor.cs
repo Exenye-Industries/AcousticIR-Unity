@@ -20,14 +20,14 @@ namespace AcousticIR.Editor.Inspectors
             // === Quality Presets ===
             EditorGUILayout.LabelField("Quality Presets", EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Quick\n4K / 32b / 2s", EditorStyles.miniButtonLeft, GUILayout.Height(35)))
-                ApplyPreset(4096, 32, 2f, 100f);
-            if (GUILayout.Button("Standard\n32K / 64b / 4s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
-                ApplyPreset(32768, 64, 4f, 500f);
-            if (GUILayout.Button("High\n131K / 128b / 6s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
-                ApplyPreset(131072, 128, 6f, 500f);
-            if (GUILayout.Button("Ultra\n500K / 200b / 10s", EditorStyles.miniButtonRight, GUILayout.Height(35)))
-                ApplyPreset(500000, 200, 10f, 1000f);
+            if (GUILayout.Button("Quick\n8K / 32b / 2s", EditorStyles.miniButtonLeft, GUILayout.Height(35)))
+                ApplyPreset(8192, 32, 2f, 200f);
+            if (GUILayout.Button("Standard\n65K / 128b / 4s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
+                ApplyPreset(65536, 128, 4f, 500f);
+            if (GUILayout.Button("High\n500K / 256b / 8s", EditorStyles.miniButtonMid, GUILayout.Height(35)))
+                ApplyPreset(500000, 256, 8f, 1000f);
+            if (GUILayout.Button("Ultra\n4M / 512b / 12s", EditorStyles.miniButtonRight, GUILayout.Height(35)))
+                ApplyPreset(4000000, 512, 12f, 3000f);
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.Space(10);
