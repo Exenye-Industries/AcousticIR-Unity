@@ -1,3 +1,4 @@
+using System.Text;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
@@ -205,6 +206,9 @@ namespace AcousticIR.Core
                 return ir;
 
             float[][] bandKernels = PrecomputeBandKernels(sampleRate);
+
+            // === DIAGNOSTICS: Dump arrival data + kernel info to file ===
+            DumpDiagnostics(arrivals, sampleRate, speedOfSound, bandKernels);
 
             // Place ALL arrivals as spectrally-shaped impulses
             AccumulateAllArrivals(ir, arrivals, sampleRate, speedOfSound, rayCount, bandKernels);
@@ -474,6 +478,146 @@ namespace AcousticIR.Core
                         bufferR[idxR] += kv * ampR;
                 }
             }
+        }
+
+        // ====================================================================
+        // DIAGNOSTICS
+        // ====================================================================
+
+        /// <summary>
+        /// Dumps comprehensive arrival statistics and kernel analysis to a text file.
+        /// This helps diagnose why the IR sounds wrong.
+        /// </summary>
+        static void DumpDiagnostics(NativeList<RayArrival> arrivals, int sampleRate,
+            float speedOfSound, float[][] bandKernels)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("========== AcousticIR DIAGNOSTICS ==========");
+            sb.AppendLine($"Total Arrivals: {arrivals.Length}");
+            sb.AppendLine($"Sample Rate: {sampleRate}");
+            sb.AppendLine();
+
+            // --- 1. Band Kernel Energy Analysis ---
+            sb.AppendLine("=== BAND KERNEL ANALYSIS (256 samples each) ===");
+            string[] bandNames = { "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz" };
+            for (int b = 0; b < NumBands; b++)
+            {
+                float peak = 0f, rmsSum = 0f;
+                for (int i = 0; i < BandKernelLength; i++)
+                {
+                    float v = bandKernels[b][i];
+                    if (math.abs(v) > peak) peak = math.abs(v);
+                    rmsSum += v * v;
+                }
+                float rms = math.sqrt(rmsSum / BandKernelLength);
+                float energy = rmsSum; // total energy = sum of squares
+                sb.AppendLine($"  Band {bandNames[b]}: peak={peak:F4}, rms={rms:F6}, energy={energy:F6}");
+            }
+            sb.AppendLine();
+
+            // --- 2. Arrivals per bounce count ---
+            sb.AppendLine("=== ARRIVALS PER BOUNCE COUNT ===");
+            int maxBounce = 0;
+            for (int i = 0; i < arrivals.Length; i++)
+                if (arrivals[i].bounceCount > maxBounce) maxBounce = arrivals[i].bounceCount;
+
+            int[] bounceCounts = new int[maxBounce + 1];
+            for (int i = 0; i < arrivals.Length; i++)
+                bounceCounts[arrivals[i].bounceCount]++;
+
+            for (int b = 0; b <= math.min(maxBounce, 20); b++)
+                sb.AppendLine($"  Bounce {b}: {bounceCounts[b]} arrivals");
+            if (maxBounce > 20)
+                sb.AppendLine($"  ... (max bounce = {maxBounce})");
+            sb.AppendLine();
+
+            // --- 3. Time windows: arrival count + per-band energy stats ---
+            sb.AppendLine("=== ENERGY PER TIME WINDOW ===");
+            float[] windowEdges = { 0f, 0.01f, 0.05f, 0.1f, 0.5f, 1f, 2f, 5f, 10f, 20f };
+
+            for (int w = 0; w < windowEdges.Length - 1; w++)
+            {
+                float tMin = windowEdges[w];
+                float tMax = windowEdges[w + 1];
+                int count = 0;
+                float[] bandSum = new float[NumBands];
+                float[] bandMin = new float[NumBands];
+                float[] bandMax = new float[NumBands];
+                for (int b = 0; b < NumBands; b++) { bandMin[b] = float.MaxValue; bandMax[b] = 0f; }
+
+                for (int i = 0; i < arrivals.Length; i++)
+                {
+                    float t = arrivals[i].time;
+                    if (t < tMin || t >= tMax) continue;
+                    count++;
+
+                    for (int b = 0; b < NumBands; b++)
+                    {
+                        float e = GetBandValue(arrivals[i].bandEnergy, b);
+                        bandSum[b] += e;
+                        if (e < bandMin[b]) bandMin[b] = e;
+                        if (e > bandMax[b]) bandMax[b] = e;
+                    }
+                }
+
+                sb.AppendLine($"  [{tMin:F2}s - {tMax:F2}s]: {count} arrivals");
+                if (count > 0)
+                {
+                    sb.Append("    AVG energy: ");
+                    for (int b = 0; b < NumBands; b++)
+                        sb.Append($"{bandNames[b]}={bandSum[b] / count:F6}  ");
+                    sb.AppendLine();
+
+                    sb.Append("    MIN energy: ");
+                    for (int b = 0; b < NumBands; b++)
+                        sb.Append($"{bandNames[b]}={bandMin[b]:F6}  ");
+                    sb.AppendLine();
+
+                    sb.Append("    MAX energy: ");
+                    for (int b = 0; b < NumBands; b++)
+                        sb.Append($"{bandNames[b]}={bandMax[b]:F6}  ");
+                    sb.AppendLine();
+
+                    // HF/LF ratio
+                    float avgLF = bandSum[0] / count; // 125Hz
+                    float avgHF = bandSum[5] / count; // 4kHz
+                    float ratio = avgLF > 1e-10f ? avgHF / avgLF : 0f;
+                    sb.AppendLine($"    4kHz/125Hz ratio: {ratio:F4}");
+                }
+                sb.AppendLine();
+            }
+
+            // --- 4. First 20 arrivals (detailed) ---
+            sb.AppendLine("=== FIRST 20 ARRIVALS (DETAILED) ===");
+            int detailCount = math.min(arrivals.Length, 20);
+            for (int i = 0; i < detailCount; i++)
+            {
+                var a = arrivals[i];
+                sb.AppendLine($"  [{i}] t={a.time * 1000:F2}ms bounce={a.bounceCount} " +
+                    $"125={a.bandEnergy.band125Hz:F6} 250={a.bandEnergy.band250Hz:F6} " +
+                    $"500={a.bandEnergy.band500Hz:F6} 1k={a.bandEnergy.band1kHz:F6} " +
+                    $"2k={a.bandEnergy.band2kHz:F6} 4k={a.bandEnergy.band4kHz:F6} " +
+                    $"total={a.bandEnergy.TotalEnergy:F6}");
+            }
+            sb.AppendLine();
+
+            // --- 5. Last 20 arrivals (detailed) ---
+            sb.AppendLine("=== LAST 20 ARRIVALS (DETAILED) ===");
+            int startIdx = math.max(0, arrivals.Length - 20);
+            for (int i = startIdx; i < arrivals.Length; i++)
+            {
+                var a = arrivals[i];
+                sb.AppendLine($"  [{i}] t={a.time * 1000:F2}ms bounce={a.bounceCount} " +
+                    $"125={a.bandEnergy.band125Hz:F6} 250={a.bandEnergy.band250Hz:F6} " +
+                    $"500={a.bandEnergy.band500Hz:F6} 1k={a.bandEnergy.band1kHz:F6} " +
+                    $"2k={a.bandEnergy.band2kHz:F6} 4k={a.bandEnergy.band4kHz:F6} " +
+                    $"total={a.bandEnergy.TotalEnergy:F6}");
+            }
+
+            // --- Write to file ---
+            string path = System.IO.Path.Combine(Application.dataPath, "AcousticIR_Diagnostics.txt");
+            System.IO.File.WriteAllText(path, sb.ToString());
+            Debug.Log($"[AcousticIR] Diagnostics written to: {path}");
         }
 
         // ====================================================================
