@@ -145,16 +145,38 @@ namespace AcousticIR.Core
                 return;
             }
 
-            // Calculate reflected direction (hybrid specular/diffuse)
-            float3 newDirection = AcousticMath.HybridReflect(
-                ray.direction, hitNormal, mat.diffusion, ref rng);
+            // Check for diffraction at grazing angles
+            float3 newDirection;
+            AbsorptionCoefficients finalEnergy = reflected;
+
+            if (parameters.enableDiffraction &&
+                AcousticMath.ShouldDiffract(ray.direction, hitNormal, ref rng))
+            {
+                // Diffraction: bend ray around edge with frequency-dependent filter
+                newDirection = AcousticMath.DiffractedDirection(ray.direction, hitNormal, ref rng);
+                finalEnergy = AcousticMath.ApplyDiffractionFilter(reflected);
+            }
+            else
+            {
+                // Normal reflection (hybrid specular/diffuse)
+                newDirection = AcousticMath.HybridReflect(
+                    ray.direction, hitNormal, mat.scattering, mat.diffusion, ref rng);
+            }
+
+            // Check if diffracted energy is still above threshold
+            if (finalEnergy.TotalEnergy < parameters.energyThreshold)
+            {
+                aliveFlags[index] = 0;
+                updatedRays[index] = ray;
+                return;
+            }
 
             // Update ray state
             updatedRays[index] = new ActiveRay
             {
                 origin = hitPoint + hitNormal * 0.001f, // Small offset to avoid self-intersection
                 direction = newDirection,
-                bandEnergy = reflected,
+                bandEnergy = finalEnergy,
                 totalDistance = newTotalDistance,
                 bounceCount = ray.bounceCount + 1,
                 randomSeed = rng.state

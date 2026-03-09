@@ -42,7 +42,11 @@ namespace AcousticIR.Config
         [Range(0f, 1f)]
         [SerializeField] float defaultAbsorption = 0.1f;
 
-        [Tooltip("Diffusion used for surfaces without an AcousticSurface component")]
+        [Tooltip("Scattering for surfaces without an AcousticSurface component (specular/diffuse blend)")]
+        [Range(0f, 1f)]
+        [SerializeField] float defaultScattering = 0.2f;
+
+        [Tooltip("Micro-roughness for surfaces without an AcousticSurface component")]
         [Range(0f, 1f)]
         [SerializeField] float defaultDiffusion = 0.5f;
 
@@ -66,7 +70,10 @@ namespace AcousticIR.Config
                 maxBounces = maxBounces,
                 maxDistance = maxDistance,
                 speedOfSound = speedOfSound,
-                energyThreshold = energyThreshold
+                energyThreshold = energyThreshold,
+                sourceForward = new Unity.Mathematics.float3(0f, 0f, 1f),
+                directivityPattern = (int)DirectivityPattern.Omnidirectional,
+                enableDiffraction = true
             };
         }
 
@@ -90,6 +97,7 @@ namespace AcousticIR.Config
                         band2kHz  = Mathf.Clamp01(baseAbs.band2kHz  * scale),
                         band4kHz  = Mathf.Clamp01(baseAbs.band4kHz  * scale)
                     },
+                    scattering = defaultScattering,
                     diffusion = defaultDiffusion
                 };
             }

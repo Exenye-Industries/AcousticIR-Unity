@@ -53,10 +53,25 @@ namespace AcousticIR.Probes
         [Range(0f, 1f)]
         [SerializeField] float defaultAbsorption = 0.1f;
 
-        [Tooltip("Surface diffusion/scattering (0 = mirror, 1 = fully diffuse).\n" +
-                 "Real surfaces are never perfectly smooth. 0.3 = polished | 0.5 = typical | 0.8 = rough")]
+        [Tooltip("Surface scattering (specular/diffuse blend).\n" +
+                 "0.1 = smooth concrete | 0.2 = typical | 0.5 = rough | 0.8 = very diffuse")]
+        [Range(0f, 1f)]
+        [SerializeField] float defaultScattering = 0.2f;
+
+        [Tooltip("Surface micro-roughness (jitter cone for imperfections).\n" +
+                 "0.3 = polished | 0.5 = typical | 0.8 = very rough")]
         [Range(0f, 1f)]
         [SerializeField] float defaultDiffusion = 0.5f;
+
+        [Header("Diffraction")]
+        [Tooltip("Enable simplified stochastic diffraction.\n" +
+                 "Allows low frequencies to bend around edges and obstacles.")]
+        [SerializeField] bool enableDiffraction = true;
+
+        [Header("Source Directivity")]
+        [Tooltip("Directivity pattern of the sound source.\n" +
+                 "Omni = equal in all directions | Cardioid = front-focused | Figure8 = front+back")]
+        [SerializeField] DirectivityPattern directivity = DirectivityPattern.Omnidirectional;
 
         [Header("IR Output")]
         [Tooltip("Sample rate of the generated IR")]
@@ -150,6 +165,7 @@ namespace AcousticIR.Probes
                     band2kHz  = math.clamp(baseAbsorption.band2kHz  * scale, 0f, 0.99f),
                     band4kHz  = math.clamp(baseAbsorption.band4kHz  * scale, 0f, 0.99f)
                 },
+                scattering = defaultScattering,
                 diffusion = defaultDiffusion
             };
 
@@ -162,7 +178,10 @@ namespace AcousticIR.Probes
                 maxBounces = maxBounces,
                 maxDistance = maxDistance,
                 speedOfSound = speedOfSound,
-                energyThreshold = energyThreshold
+                energyThreshold = energyThreshold,
+                sourceForward = transform.forward,
+                directivityPattern = (int)directivity,
+                enableDiffraction = enableDiffraction
             };
 
             using var raytracer = new AcousticRaytracer(

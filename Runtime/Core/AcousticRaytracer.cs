@@ -66,11 +66,17 @@ namespace AcousticIR.Core
             for (int i = 0; i < rayCount; i++)
             {
                 float3 dir = AcousticMath.FibonacciSpherePoint(i, rayCount);
+
+                // Apply source directivity: scale initial energy by directional gain
+                float gain = AcousticMath.DirectivityGain(
+                    dir, parameters.sourceForward, parameters.directivityPattern);
+                var initialEnergy = AbsorptionCoefficients.Uniform(gain);
+
                 activeRays.Add(new ActiveRay
                 {
                     origin = parameters.sourcePosition,
                     direction = dir,
-                    bandEnergy = AbsorptionCoefficients.FullEnergy,
+                    bandEnergy = initialEnergy,
                     totalDistance = 0f,
                     bounceCount = 0,
                     randomSeed = baseSeed + (uint)i
@@ -226,7 +232,11 @@ namespace AcousticIR.Core
                 float3 dir = AcousticMath.FibonacciSpherePoint(i, debugRayCount);
                 float3 origin = parameters.sourcePosition;
                 float totalDist = 0f;
-                var energy = AbsorptionCoefficients.FullEnergy;
+
+                // Apply source directivity to initial energy
+                float gain = AcousticMath.DirectivityGain(
+                    dir, parameters.sourceForward, parameters.directivityPattern);
+                var energy = AbsorptionCoefficients.Uniform(gain);
                 var rng = new Unity.Mathematics.Random(baseSeed + (uint)i);
 
                 for (int bounce = 0; bounce < parameters.maxBounces; bounce++)
@@ -277,11 +287,25 @@ namespace AcousticIR.Core
                         if (energy.TotalEnergy < parameters.energyThreshold)
                             break;
 
-                        // Reflect
+                        // Reflect or diffract
                         rng = new Unity.Mathematics.Random(
                             rng.state + (uint)(bounce * 7919));
                         float3 normal = (float3)(Vector3)hit.normal;
-                        dir = AcousticMath.HybridReflect(dir, normal, mat.diffusion, ref rng);
+
+                        if (parameters.enableDiffraction &&
+                            AcousticMath.ShouldDiffract(dir, normal, ref rng))
+                        {
+                            dir = AcousticMath.DiffractedDirection(dir, normal, ref rng);
+                            energy = AcousticMath.ApplyDiffractionFilter(energy);
+                        }
+                        else
+                        {
+                            dir = AcousticMath.HybridReflect(dir, normal, mat.scattering, mat.diffusion, ref rng);
+                        }
+
+                        if (energy.TotalEnergy < parameters.energyThreshold)
+                            break;
+
                         origin = hitPoint + normal * 0.001f;
                         totalDist += hitDist;
 

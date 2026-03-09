@@ -4,6 +4,28 @@ using Unity.Mathematics;
 namespace AcousticIR.Core
 {
     /// <summary>
+    /// Source directivity pattern for ray emission.
+    /// Controls the angular energy distribution of emitted rays.
+    /// </summary>
+    public enum DirectivityPattern
+    {
+        /// <summary>Equal energy in all directions.</summary>
+        Omnidirectional,
+
+        /// <summary>Cardioid: gain = 0.5 + 0.5*cos(θ). -6dB at 90°, null at 180°.</summary>
+        Cardioid,
+
+        /// <summary>Supercardioid: gain = 0.37 + 0.63*cos(θ). Narrower than cardioid, small rear lobe.</summary>
+        Supercardioid,
+
+        /// <summary>Hypercardioid: gain = 0.25 + 0.75*cos(θ). Even narrower, larger rear lobe.</summary>
+        Hypercardioid,
+
+        /// <summary>Figure-8 / Bidirectional: gain = |cos(θ)|. Equal front and back, null at 90°.</summary>
+        Figure8
+    }
+
+    /// <summary>
     /// Stereo microphone configuration for IR generation.
     /// </summary>
     public enum StereoMode
@@ -162,7 +184,16 @@ namespace AcousticIR.Core
         public AbsorptionCoefficients absorption;
 
         /// <summary>
-        /// Surface diffusion: 0 = perfect mirror (specular), 1 = fully diffuse (Lambertian).
+        /// Surface scattering: controls specular/diffuse reflection blend.
+        /// 0 = purely specular, 1 = fully diffuse (Lambertian).
+        /// Determines how much energy is redirected from the specular direction.
+        /// </summary>
+        public float scattering;
+
+        /// <summary>
+        /// Micro-roughness: scales the jitter cone angle for surface imperfections.
+        /// 0 = no jitter, 1 = maximum jitter (~4° cone).
+        /// Independent of scattering - even specular surfaces have micro-roughness.
         /// </summary>
         public float diffusion;
     }
@@ -232,6 +263,15 @@ namespace AcousticIR.Core
 
         /// <summary>Minimum total band energy before ray termination.</summary>
         public float energyThreshold;
+
+        /// <summary>Forward direction of the source (for directivity patterns).</summary>
+        public float3 sourceForward;
+
+        /// <summary>Source directivity pattern (int cast of DirectivityPattern enum for Burst compatibility).</summary>
+        public int directivityPattern;
+
+        /// <summary>Whether to enable stochastic diffraction at grazing angles.</summary>
+        public bool enableDiffraction;
     }
 
     /// <summary>

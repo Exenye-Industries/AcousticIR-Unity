@@ -37,7 +37,14 @@ namespace AcousticIR.Materials
         [SerializeField] float absorption4kHz = 0.35f;
 
         [Header("Scattering")]
-        [Tooltip("Surface diffusion: 0 = mirror reflection, 1 = fully diffuse (Lambertian)")]
+        [Tooltip("Surface scattering: controls specular/diffuse reflection blend.\n" +
+                 "0 = mirror reflection, 1 = fully diffuse (Lambertian).\n" +
+                 "Smooth concrete: 0.1 | Brick: 0.3 | Carpet: 0.7 | Foliage: 0.9")]
+        [Range(0f, 1f)]
+        [SerializeField] float scattering = 0.2f;
+
+        [Tooltip("Micro-roughness: scales jitter cone for surface imperfections.\n" +
+                 "0 = perfectly smooth | 0.5 = typical | 1 = very rough")]
         [Range(0f, 1f)]
         [SerializeField] float diffusion = 0.3f;
 
@@ -47,6 +54,7 @@ namespace AcousticIR.Materials
         public float Absorption1kHz => absorption1kHz;
         public float Absorption2kHz => absorption2kHz;
         public float Absorption4kHz => absorption4kHz;
+        public float Scattering => scattering;
         public float Diffusion => diffusion;
 
         /// <summary>
@@ -65,6 +73,7 @@ namespace AcousticIR.Materials
                     band2kHz = absorption2kHz,
                     band4kHz = absorption4kHz
                 },
+                scattering = scattering,
                 diffusion = diffusion
             };
         }
@@ -73,7 +82,7 @@ namespace AcousticIR.Materials
         /// Sets all absorption values at once. Useful for presets.
         /// </summary>
         public void SetAbsorption(float hz125, float hz250, float hz500,
-            float hz1k, float hz2k, float hz4k, float diff)
+            float hz1k, float hz2k, float hz4k, float scat, float diff)
         {
             absorption125Hz = hz125;
             absorption250Hz = hz250;
@@ -81,6 +90,7 @@ namespace AcousticIR.Materials
             absorption1kHz = hz1k;
             absorption2kHz = hz2k;
             absorption4kHz = hz4k;
+            scattering = scat;
             diffusion = diff;
         }
     }
