@@ -144,6 +144,13 @@ namespace AcousticIR.Probes
         /// </summary>
         public IRData Bake(IRData targetIR = null)
         {
+            // FIRST: Ensure procedural geometry (voxel chunks etc.) has MeshColliders.
+            // Must happen BEFORE CollectMaterials so the raytracer sees the colliders.
+            PrepareSceneColliders();
+
+            // Pre-bake geometry diagnostic
+            DiagnoseGeometry(SourcePosition);
+
             // Build material mapping from AcousticSurface components (if any exist)
             var materialList = new List<MaterialData>();
             var colliderMapping = new Dictionary<int, int>();
@@ -189,13 +196,6 @@ namespace AcousticIR.Probes
 
             Debug.Log($"[AcousticIR] Baking IR: {rayCount} rays, {maxBounces} bounces, " +
                       $"source={SourcePosition}, receiver={ReceiverPosition}");
-
-            // Prepare colliders: invoke PrepareCollidersForBake() on any component that has it.
-            // This allows voxel/procedural systems to generate MeshColliders on-demand before baking.
-            PrepareSceneColliders();
-
-            // Pre-bake geometry diagnostic
-            DiagnoseGeometry(SourcePosition);
 
             var arrivals = raytracer.Trace(rayCount);
 
