@@ -316,10 +316,17 @@ namespace AcousticIR.Probes
                 var method = mb.GetType().GetMethod("PrepareCollidersForBake",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
 
-                if (method != null)
+                if (method != null && method.GetParameters().Length == 0)
                 {
-                    method.Invoke(mb, null);
-                    prepared++;
+                    try
+                    {
+                        method.Invoke(mb, new object[0]);
+                        prepared++;
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogWarning($"[AcousticIR] PrepareCollidersForBake failed on {mb.GetType().Name}: {e.Message}");
+                    }
                 }
             }
 
