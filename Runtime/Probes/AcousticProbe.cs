@@ -190,6 +190,10 @@ namespace AcousticIR.Probes
             Debug.Log($"[AcousticIR] Baking IR: {rayCount} rays, {maxBounces} bounces, " +
                       $"source={SourcePosition}, receiver={ReceiverPosition}");
 
+            // Prepare colliders: invoke PrepareCollidersForBake() on any component that has it.
+            // This allows voxel/procedural systems to generate MeshColliders on-demand before baking.
+            PrepareSceneColliders();
+
             // Pre-bake geometry diagnostic
             DiagnoseGeometry(SourcePosition);
 
@@ -294,6 +298,33 @@ namespace AcousticIR.Probes
 
                 colliderMapping[collider.GetInstanceID()] = matIndex;
             }
+        }
+
+        /// <summary>
+        /// Finds and invokes PrepareCollidersForBake() on any MonoBehaviour in the scene.
+        /// This allows voxel/procedural geometry systems to create MeshColliders on-demand.
+        /// Uses reflection to avoid hard dependencies on specific projects.
+        /// </summary>
+        void PrepareSceneColliders()
+        {
+            var allBehaviours = FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None);
+            int prepared = 0;
+
+            foreach (var mb in allBehaviours)
+            {
+                if (mb == null) continue;
+                var method = mb.GetType().GetMethod("PrepareCollidersForBake",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+                if (method != null)
+                {
+                    method.Invoke(mb, null);
+                    prepared++;
+                }
+            }
+
+            if (prepared > 0)
+                Debug.Log($"[AcousticIR] Called PrepareCollidersForBake() on {prepared} component(s).");
         }
 
         /// <summary>
