@@ -148,6 +148,10 @@ namespace AcousticIR.Probes
             // Must happen BEFORE CollectMaterials so the raytracer sees the colliders.
             PrepareSceneColliders();
 
+            // Force Unity physics engine to recognize newly created colliders immediately.
+            // Without this, RaycastCommand won't hit colliders added in the same frame.
+            Physics.SyncTransforms();
+
             // Pre-bake geometry diagnostic
             DiagnoseGeometry(SourcePosition);
 
